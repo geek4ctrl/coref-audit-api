@@ -74,6 +74,21 @@ const sanitizeUser = (user) => ({
   updatedAt: user.updated_at
 });
 
+const sanitizeReceptionDocument = (document) => ({
+  id: document.id,
+  number: document.number,
+  documentType: document.document_type,
+  receivedDate: document.received_date,
+  sender: document.sender,
+  subject: document.subject,
+  category: document.category,
+  confidentiality: document.confidentiality,
+  observations: document.observations,
+  status: document.status,
+  createdByUserId: document.created_by_user_id,
+  createdAt: document.created_at
+});
+
 app.get("/", (req, res) => {
   res.send("API is running");
 });
@@ -254,6 +269,98 @@ app.delete("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) 
     return res.status(204).send();
   } catch (error) {
     return res.status(500).json({ error: "Failed to delete user" });
+  }
+});
+
+app.get("/reception/documents/recent", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const limit = Math.min(Number.parseInt(req.query.limit, 10) || 10, 50);
+    const result = await query(
+      `
+      SELECT *
+      FROM reception_documents
+      ORDER BY created_at DESC
+      LIMIT $1
+      `,
+      [limit]
+    );
+
+    return res.json({ documents: result.rows.map(sanitizeReceptionDocument) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch reception documents" });
+  }
+});
+
+app.post("/reception/documents", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const {
+      documentType,
+      receivedDate,
+      sender,
+      subject,
+      category,
+      confidentiality,
+      observations
+    } = req.body || {};
+
+    if (!documentType || !receivedDate || !sender || !subject || !category || !confidentiality) {
+      return res.status(400).json({
+        error: "documentType, receivedDate, sender, subject, category, and confidentiality are required"
+      });
+    }
+
+    const year = new Date(receivedDate).getFullYear();
+    if (!Number.isInteger(year) || year < 2000) {
+      return res.status(400).json({ error: "Invalid receivedDate" });
+    }
+
+    const sequenceResult = await query(
+      `
+      SELECT COALESCE(MAX(SUBSTRING(number FROM 12)::INT), 0) + 1 AS next_seq
+      FROM reception_documents
+      WHERE number LIKE $1
+      `,
+      [`COREF-${year}-%`]
+    );
+
+    const nextSequence = String(sequenceResult.rows[0].next_seq).padStart(4, "0");
+    const number = `COREF-${year}-${nextSequence}`;
+
+    const result = await query(
+      `
+      INSERT INTO reception_documents (
+        number,
+        document_type,
+        received_date,
+        sender,
+        subject,
+        category,
+        confidentiality,
+        observations,
+        created_by_user_id
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING *
+      `,
+      [
+        number,
+        documentType,
+        receivedDate,
+        sender,
+        subject,
+        category,
+        confidentiality,
+        observations || null,
+        req.user.userId
+      ]
+    );
+
+    return res.status(201).json({ document: sanitizeReceptionDocument(result.rows[0]) });
+  } catch (error) {
+    if (error.code === "23505") {
+      return res.status(409).json({ error: "A document number conflict occurred. Please retry." });
+    }
+    return res.status(500).json({ error: "Failed to create reception document" });
   }
 });
 
