@@ -113,6 +113,33 @@ const sanitizeBordereau = (bordereau) => ({
   }
 });
 
+const sanitizeAssistantDocument = (document) => {
+  const statusTone =
+    document.assistant_status === "Terminé"
+      ? "success"
+      : document.assistant_status === "En cours"
+        ? "warning"
+        : "info";
+
+  const isDelayed = document.delay_label === "En retard";
+
+  return {
+    id: document.id,
+    number: document.number,
+    object: document.subject,
+    type: document.document_type,
+    owner: "Assistant Chef",
+    ownerRole: "Cabinet",
+    status: document.assistant_status,
+    statusTone,
+    lastActionAt: document.last_action_at,
+    lastActionNote: document.assistant_note || "Mise à jour en attente",
+    delay: document.delay_label,
+    delayTone: isDelayed ? "danger" : "muted",
+    priority: document.assistant_priority
+  };
+};
+
 app.get("/", (req, res) => {
   res.send("API is running");
 });
@@ -559,6 +586,189 @@ app.post("/reception/bordereaux/:id/mark-signed", authRequired, requireRole(["AD
     });
   } catch (error) {
     return res.status(500).json({ error: "Failed to mark bordereau as signed" });
+  }
+});
+
+app.get("/assistant/dashboard", authRequired, requireRole(["ADMIN", "ASSISTANT_CHEF", "CHEF_SG"]), async (req, res) => {
+  try {
+    const limit = Math.min(Number.parseInt(req.query.limit, 10) || 25, 100);
+
+    const [statsResult, documentsResult] = await Promise.all([
+      query(
+        `
+        SELECT
+          COUNT(*)::INT AS total_count,
+          COUNT(*) FILTER (WHERE assistant_status = U&'\\00C0 traiter')::INT AS to_process_count,
+          COUNT(*) FILTER (WHERE assistant_status = 'En cours')::INT AS in_progress_count,
+          COUNT(*) FILTER (WHERE assistant_status = 'Terminé')::INT AS done_count,
+          COUNT(*) FILTER (WHERE assistant_status = 'Envoyé au Chef')::INT AS sent_to_chief_count,
+          COUNT(*) FILTER (
+            WHERE assistant_treated_at IS NOT NULL
+              AND assistant_treated_at >= date_trunc('week', NOW())
+          )::INT AS treated_this_week_count,
+          COUNT(*) FILTER (
+            WHERE assistant_status <> 'Terminé'
+              AND received_date < CURRENT_DATE - INTERVAL '3 days'
+          )::INT AS delayed_count,
+          COUNT(*) FILTER (
+            WHERE assistant_status = 'En cours'
+              AND received_date < CURRENT_DATE - INTERVAL '7 days'
+          )::INT AS blocked_count
+        FROM reception_documents
+        `
+      ),
+      query(
+        `
+        SELECT
+          id,
+          number,
+          document_type,
+          subject,
+          assistant_status,
+          assistant_priority,
+          assistant_note,
+          received_date,
+          created_at,
+          COALESCE(assistant_treated_at, assistant_sent_to_chief_at, created_at) AS last_action_at,
+          CASE
+            WHEN assistant_status <> 'Terminé' AND received_date < CURRENT_DATE - INTERVAL '3 days' THEN 'En retard'
+            ELSE '—'
+          END AS delay_label
+        FROM reception_documents
+        ORDER BY created_at DESC
+        LIMIT $1
+        `,
+        [limit]
+      )
+    ]);
+
+    const stats = statsResult.rows[0] || {};
+
+    return res.json({
+      cards: {
+        toReceive: stats.total_count || 0,
+        toProcess: stats.to_process_count || 0,
+        inProgress: stats.in_progress_count || 0,
+        done: stats.done_count || 0
+      },
+      quickFilters: {
+        all: stats.total_count || 0,
+        toProcess: stats.to_process_count || 0,
+        assignedToMe: stats.total_count || 0,
+        sentByMe: stats.sent_to_chief_count || 0,
+        noAck: stats.sent_to_chief_count || 0,
+        delayed: stats.delayed_count || 0,
+        blocked: stats.blocked_count || 0,
+        treatedThisWeek: stats.treated_this_week_count || 0
+      },
+      documents: documentsResult.rows.map(sanitizeAssistantDocument)
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch assistant dashboard" });
+  }
+});
+
+app.patch("/assistant/documents/:id/classify", authRequired, requireRole(["ADMIN", "ASSISTANT_CHEF", "CHEF_SG"]), async (req, res) => {
+  try {
+    const { priority, note, status } = req.body || {};
+
+    const allowedPriorities = ["Basse", "Normale", "Haute", "Urgente"];
+    if (priority && !allowedPriorities.includes(priority)) {
+      return res.status(400).json({ error: "Invalid priority" });
+    }
+
+    const allowedStatuses = ["À traiter", "En cours"];
+    if (status && !allowedStatuses.includes(status)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+
+    const result = await query(
+      `
+      UPDATE reception_documents
+      SET assistant_priority = COALESCE($1, assistant_priority),
+          assistant_note = COALESCE($2, assistant_note),
+          assistant_status = COALESCE($3, 'En cours')
+      WHERE id = $4
+      RETURNING *
+      `,
+      [priority || null, note || null, status || null, req.params.id]
+    );
+
+    const document = result.rows[0];
+    if (!document) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+
+    return res.json({
+      document: {
+        id: document.id,
+        assistantStatus: document.assistant_status,
+        assistantPriority: document.assistant_priority,
+        assistantNote: document.assistant_note
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to classify document" });
+  }
+});
+
+app.patch("/assistant/documents/:id/send-to-chief", authRequired, requireRole(["ADMIN", "ASSISTANT_CHEF", "CHEF_SG"]), async (req, res) => {
+  try {
+    const result = await query(
+      `
+      UPDATE reception_documents
+      SET assistant_status = 'Envoyé au Chef',
+          assistant_sent_to_chief_at = NOW()
+      WHERE id = $1
+      RETURNING id, assistant_status, assistant_sent_to_chief_at
+      `,
+      [req.params.id]
+    );
+
+    const document = result.rows[0];
+    if (!document) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+
+    return res.json({
+      document: {
+        id: document.id,
+        assistantStatus: document.assistant_status,
+        sentToChiefAt: document.assistant_sent_to_chief_at
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to send document to chief" });
+  }
+});
+
+app.patch("/assistant/documents/:id/mark-treated", authRequired, requireRole(["ADMIN", "ASSISTANT_CHEF", "CHEF_SG"]), async (req, res) => {
+  try {
+    const result = await query(
+      `
+      UPDATE reception_documents
+      SET assistant_status = 'Terminé',
+          assistant_treated_at = NOW()
+      WHERE id = $1
+      RETURNING id, assistant_status, assistant_treated_at
+      `,
+      [req.params.id]
+    );
+
+    const document = result.rows[0];
+    if (!document) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+
+    return res.json({
+      document: {
+        id: document.id,
+        assistantStatus: document.assistant_status,
+        treatedAt: document.assistant_treated_at
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to mark document as treated" });
   }
 });
 

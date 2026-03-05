@@ -38,11 +38,40 @@ ALTER TABLE reception_documents
   ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
 
 ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS assistant_status TEXT NOT NULL DEFAULT U&'\00C0 traiter';
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS assistant_priority TEXT NOT NULL DEFAULT 'Normale';
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS assistant_note TEXT;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS assistant_sent_to_chief_at TIMESTAMPTZ;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS assistant_treated_at TIMESTAMPTZ;
+
+ALTER TABLE reception_documents
   ALTER COLUMN status SET DEFAULT U&'Document cr\00E9\00E9';
 
 UPDATE reception_documents
 SET status = U&'Document cr\00E9\00E9'
 WHERE status LIKE 'Document cr%';
+
+UPDATE reception_documents
+SET assistant_status = U&'\00C0 traiter'
+WHERE assistant_status IS NULL;
+
+UPDATE reception_documents
+SET assistant_priority = 'Normale'
+WHERE assistant_priority IS NULL;
+
+CREATE INDEX IF NOT EXISTS reception_documents_assistant_status_idx
+  ON reception_documents(assistant_status);
+
+CREATE INDEX IF NOT EXISTS reception_documents_assistant_priority_idx
+  ON reception_documents(assistant_priority);
 
 CREATE TABLE IF NOT EXISTS reception_bordereaux (
   id SERIAL PRIMARY KEY,
