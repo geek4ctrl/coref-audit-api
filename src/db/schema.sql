@@ -66,6 +66,22 @@ CREATE INDEX IF NOT EXISTS reception_bordereaux_generated_at_idx
 CREATE INDEX IF NOT EXISTS reception_bordereaux_status_idx
   ON reception_bordereaux(status);
 
+CREATE TABLE IF NOT EXISTS messages (
+  id SERIAL PRIMARY KEY,
+  sender_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  recipient_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  subject TEXT NOT NULL,
+  content TEXT NOT NULL,
+  read_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS messages_recipient_created_at_idx
+  ON messages(recipient_user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS messages_sender_created_at_idx
+  ON messages(sender_user_id, created_at DESC);
+
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN

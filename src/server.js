@@ -113,6 +113,24 @@ const sanitizeBordereau = (bordereau) => ({
   }
 });
 
+const sanitizeMessage = (message) => ({
+  id: message.id,
+  subject: message.subject,
+  content: message.content,
+  createdAt: message.created_at,
+  readAt: message.read_at,
+  sender: {
+    id: message.sender_user_id,
+    name: message.sender_name,
+    email: message.sender_email
+  },
+  recipient: {
+    id: message.recipient_user_id,
+    name: message.recipient_name,
+    email: message.recipient_email
+  }
+});
+
 app.get("/", (req, res) => {
   res.send("API is running");
 });
@@ -293,6 +311,154 @@ app.delete("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) 
     return res.status(204).send();
   } catch (error) {
     return res.status(500).json({ error: "Failed to delete user" });
+  }
+});
+
+app.get("/messagerie/users", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const result = await query(
+      `
+      SELECT id, name, email
+      FROM users
+      WHERE is_active = TRUE
+        AND id <> $1
+      ORDER BY name ASC
+      `,
+      [req.user.userId]
+    );
+
+    return res.json({ users: result.rows });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch recipients" });
+  }
+});
+
+app.get("/messagerie/inbox", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 100);
+    const [result, unreadResult] = await Promise.all([
+      query(
+      `
+      SELECT
+        m.*,
+        sender.name AS sender_name,
+        sender.email AS sender_email,
+        recipient.name AS recipient_name,
+        recipient.email AS recipient_email
+      FROM messages m
+      JOIN users sender ON sender.id = m.sender_user_id
+      JOIN users recipient ON recipient.id = m.recipient_user_id
+      WHERE m.recipient_user_id = $1
+      ORDER BY m.created_at DESC
+      LIMIT $2
+      `,
+      [req.user.userId, limit]
+      ),
+      query(
+        `
+        SELECT COUNT(*)::INT AS unread_count
+        FROM messages
+        WHERE recipient_user_id = $1
+          AND read_at IS NULL
+        `,
+        [req.user.userId]
+      )
+    ]);
+
+    return res.json({
+      unreadCount: unreadResult.rows[0]?.unread_count ?? 0,
+      messages: result.rows.map(sanitizeMessage)
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch inbox" });
+  }
+});
+
+app.post("/messagerie/messages/:id/mark-read", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const result = await query(
+      `
+      UPDATE messages
+      SET read_at = COALESCE(read_at, NOW())
+      WHERE id = $1
+        AND recipient_user_id = $2
+      RETURNING *
+      `,
+      [req.params.id, req.user.userId]
+    );
+
+    const message = result.rows[0];
+    if (!message) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    return res.json({ message });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to mark message as read" });
+  }
+});
+
+app.get("/messagerie/sent", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 100);
+    const result = await query(
+      `
+      SELECT
+        m.*,
+        sender.name AS sender_name,
+        sender.email AS sender_email,
+        recipient.name AS recipient_name,
+        recipient.email AS recipient_email
+      FROM messages m
+      JOIN users sender ON sender.id = m.sender_user_id
+      JOIN users recipient ON recipient.id = m.recipient_user_id
+      WHERE m.sender_user_id = $1
+      ORDER BY m.created_at DESC
+      LIMIT $2
+      `,
+      [req.user.userId, limit]
+    );
+
+    return res.json({ messages: result.rows.map(sanitizeMessage) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch sent messages" });
+  }
+});
+
+app.post("/messagerie/messages", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const { recipientUserId, subject, content } = req.body || {};
+
+    if (!recipientUserId || !subject || !content) {
+      return res.status(400).json({ error: "recipientUserId, subject, and content are required" });
+    }
+
+    const recipientResult = await query(
+      `
+      SELECT id
+      FROM users
+      WHERE id = $1
+        AND is_active = TRUE
+      `,
+      [recipientUserId]
+    );
+
+    if (!recipientResult.rows[0]) {
+      return res.status(404).json({ error: "Recipient not found" });
+    }
+
+    const result = await query(
+      `
+      INSERT INTO messages (sender_user_id, recipient_user_id, subject, content)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+      `,
+      [req.user.userId, recipientUserId, subject.trim(), content.trim()]
+    );
+
+    return res.status(201).json({ message: result.rows[0] });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to send message" });
   }
 });
 
