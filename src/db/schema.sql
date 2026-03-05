@@ -82,6 +82,19 @@ CREATE INDEX IF NOT EXISTS messages_recipient_created_at_idx
 CREATE INDEX IF NOT EXISTS messages_sender_created_at_idx
   ON messages(sender_user_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS message_attachments (
+  id SERIAL PRIMARY KEY,
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  file_name TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  storage_path TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS message_attachments_message_id_idx
+  ON message_attachments(message_id);
+
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
