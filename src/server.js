@@ -323,7 +323,7 @@ app.get("/reception/documents/recent", authRequired, requireRole(["ADMIN", "RECE
 
 app.get("/reception/dashboard/stats", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
-    const [entriesTodayResult, toDistributeResult, toScanResult, pendingBordereauxResult] = await Promise.all([
+    const [entriesTodayResult, toDistributeResult, toScanResult, pendingBordereauxResult, distributedThisMonthResult] = await Promise.all([
       query(
         `
         SELECT COUNT(*)::INT AS value
@@ -352,6 +352,15 @@ app.get("/reception/dashboard/stats", authRequired, requireRole(["ADMIN", "RECEP
         FROM reception_bordereaux
         WHERE status <> 'Signé'
         `
+      ),
+      query(
+        `
+        SELECT COUNT(*)::INT AS value
+        FROM reception_documents
+        WHERE status = 'Remis'
+          AND delivered_at >= date_trunc('month', CURRENT_DATE)
+          AND delivered_at < (date_trunc('month', CURRENT_DATE) + INTERVAL '1 month')
+        `
       )
     ]);
 
@@ -359,7 +368,8 @@ app.get("/reception/dashboard/stats", authRequired, requireRole(["ADMIN", "RECEP
       entriesToday: entriesTodayResult.rows[0]?.value ?? 0,
       toScan: toScanResult.rows[0]?.value ?? 0,
       toDistribute: toDistributeResult.rows[0]?.value ?? 0,
-      pendingBordereaux: pendingBordereauxResult.rows[0]?.value ?? 0
+      pendingBordereaux: pendingBordereauxResult.rows[0]?.value ?? 0,
+      distributedThisMonth: distributedThisMonthResult.rows[0]?.value ?? 0
     });
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch reception dashboard stats" });
