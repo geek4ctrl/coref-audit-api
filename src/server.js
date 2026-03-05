@@ -376,6 +376,57 @@ app.get("/reception/dashboard/stats", authRequired, requireRole(["ADMIN", "RECEP
   }
 });
 
+app.get("/reception/search", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const rawQuery = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 30, 1), 100);
+
+    if (!rawQuery) {
+      return res.json({ results: [] });
+    }
+
+    const likeQuery = `%${rawQuery}%`;
+    const result = await query(
+      `
+      SELECT
+        d.id,
+        d.number,
+        d.subject,
+        d.status,
+        d.sender,
+        d.category,
+        d.created_at,
+        d.delivered_at
+      FROM reception_documents d
+      WHERE d.number ILIKE $1
+         OR d.subject ILIKE $1
+         OR d.sender ILIKE $1
+         OR d.category ILIKE $1
+         OR d.confidentiality ILIKE $1
+         OR d.status ILIKE $1
+      ORDER BY d.created_at DESC
+      LIMIT $2
+      `,
+      [likeQuery, limit]
+    );
+
+    const results = result.rows.map((row) => ({
+      id: row.id,
+      number: row.number,
+      subject: row.subject,
+      status: row.status,
+      sender: row.sender,
+      category: row.category,
+      createdAt: row.created_at,
+      deliveredAt: row.delivered_at
+    }));
+
+    return res.json({ results });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to search reception documents" });
+  }
+});
+
 app.post("/reception/documents", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
     const {
