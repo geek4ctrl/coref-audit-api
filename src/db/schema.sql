@@ -35,11 +35,36 @@ CREATE INDEX IF NOT EXISTS reception_documents_received_date_idx
   ON reception_documents(received_date DESC);
 
 ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+
+ALTER TABLE reception_documents
   ALTER COLUMN status SET DEFAULT U&'Document cr\00E9\00E9';
 
 UPDATE reception_documents
 SET status = U&'Document cr\00E9\00E9'
 WHERE status LIKE 'Document cr%';
+
+CREATE TABLE IF NOT EXISTS reception_bordereaux (
+  id SERIAL PRIMARY KEY,
+  document_id INTEGER NOT NULL UNIQUE REFERENCES reception_documents(id) ON DELETE CASCADE,
+  number TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT U&'Non sign\00E9',
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  signed_at TIMESTAMPTZ
+);
+
+ALTER TABLE reception_bordereaux
+  ALTER COLUMN status SET DEFAULT U&'Non sign\00E9';
+
+UPDATE reception_bordereaux
+SET status = U&'Non sign\00E9'
+WHERE status LIKE 'Non sign%';
+
+CREATE INDEX IF NOT EXISTS reception_bordereaux_generated_at_idx
+  ON reception_bordereaux(generated_at DESC);
+
+CREATE INDEX IF NOT EXISTS reception_bordereaux_status_idx
+  ON reception_bordereaux(status);
 
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$
