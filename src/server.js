@@ -530,6 +530,38 @@ app.get("/reception/bordereaux", authRequired, requireRole(["ADMIN", "RECEPTION"
   }
 });
 
+app.post("/reception/bordereaux/:id/mark-signed", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const result = await query(
+      `
+      UPDATE reception_bordereaux
+      SET status = 'Signé',
+          signed_at = NOW()
+      WHERE id = $1
+      RETURNING *
+      `,
+      [req.params.id]
+    );
+
+    const bordereau = result.rows[0];
+    if (!bordereau) {
+      return res.status(404).json({ error: "Bordereau not found" });
+    }
+
+    return res.json({
+      bordereau: {
+        id: bordereau.id,
+        number: bordereau.number,
+        status: bordereau.status,
+        generatedAt: bordereau.generated_at,
+        signedAt: bordereau.signed_at
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to mark bordereau as signed" });
+  }
+});
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Server listening on ${port}`);
