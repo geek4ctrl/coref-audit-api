@@ -321,6 +321,51 @@ app.get("/reception/documents/recent", authRequired, requireRole(["ADMIN", "RECE
   }
 });
 
+app.get("/reception/dashboard/stats", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const [entriesTodayResult, toDistributeResult, toScanResult, pendingBordereauxResult] = await Promise.all([
+      query(
+        `
+        SELECT COUNT(*)::INT AS value
+        FROM reception_documents
+        WHERE created_at::date = CURRENT_DATE
+        `
+      ),
+      query(
+        `
+        SELECT COUNT(*)::INT AS value
+        FROM reception_documents
+        WHERE status <> 'Remis'
+        `
+      ),
+      query(
+        `
+        SELECT COUNT(*)::INT AS value
+        FROM reception_documents d
+        LEFT JOIN reception_bordereaux b ON b.document_id = d.id
+        WHERE b.id IS NULL
+        `
+      ),
+      query(
+        `
+        SELECT COUNT(*)::INT AS value
+        FROM reception_bordereaux
+        WHERE status <> 'Signé'
+        `
+      )
+    ]);
+
+    return res.json({
+      entriesToday: entriesTodayResult.rows[0]?.value ?? 0,
+      toScan: toScanResult.rows[0]?.value ?? 0,
+      toDistribute: toDistributeResult.rows[0]?.value ?? 0,
+      pendingBordereaux: pendingBordereauxResult.rows[0]?.value ?? 0
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch reception dashboard stats" });
+  }
+});
+
 app.post("/reception/documents", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
     const {
