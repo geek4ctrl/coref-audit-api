@@ -2,12 +2,35 @@ import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
+import multer from "multer";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
 import { query } from "./db.js";
 import "dotenv/config";
 
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
+
+const messageUploadsDir = path.resolve(process.cwd(), "uploads", "messages");
+if (!fs.existsSync(messageUploadsDir)) {
+  fs.mkdirSync(messageUploadsDir, { recursive: true });
+}
+
+const messageUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, messageUploadsDir),
+    filename: (_req, file, cb) => {
+      const extension = path.extname(file.originalname || "");
+      const randomSuffix = crypto.randomBytes(8).toString("hex");
+      cb(null, `${Date.now()}-${randomSuffix}${extension}`);
+    }
+  }),
+  limits: {
+    fileSize: 10 * 1024 * 1024
+  }
+});
 
 const JWT_SECRET = process.env.JWT_SECRET || "";
 const TOKEN_EXPIRY = "8h";
@@ -138,6 +161,58 @@ const sanitizeAssistantDocument = (document) => {
     delayTone: isDelayed ? "danger" : "muted",
     priority: document.assistant_priority
   };
+};
+
+const sanitizeMessageAttachment = (attachment) => ({
+  id: attachment.id,
+  fileName: attachment.file_name,
+  mimeType: attachment.mime_type,
+  sizeBytes: attachment.size_bytes,
+  createdAt: attachment.created_at
+});
+
+const sanitizeMessage = (message, attachments = []) => ({
+  id: message.id,
+  subject: message.subject,
+  content: message.content,
+  createdAt: message.created_at,
+  readAt: message.read_at,
+  sender: {
+    id: message.sender_user_id,
+    name: message.sender_name,
+    email: message.sender_email
+  },
+  recipient: {
+    id: message.recipient_user_id,
+    name: message.recipient_name,
+    email: message.recipient_email
+  },
+  attachments
+});
+
+const fetchAttachmentsForMessageIds = async (messageIds) => {
+  if (!messageIds.length) {
+    return new Map();
+  }
+
+  const result = await query(
+    `
+    SELECT *
+    FROM message_attachments
+    WHERE message_id = ANY($1)
+    ORDER BY created_at ASC
+    `,
+    [messageIds]
+  );
+
+  const attachmentMap = new Map();
+  for (const row of result.rows) {
+    const existing = attachmentMap.get(row.message_id) || [];
+    existing.push(sanitizeMessageAttachment(row));
+    attachmentMap.set(row.message_id, existing);
+  }
+
+  return attachmentMap;
 };
 
 app.get("/", (req, res) => {
@@ -323,6 +398,238 @@ app.delete("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) 
   }
 });
 
+app.get("/messagerie/users", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const result = await query(
+      `
+      SELECT id, name, email
+      FROM users
+      WHERE is_active = TRUE
+        AND id <> $1
+      ORDER BY name ASC
+      `,
+      [req.user.userId]
+    );
+
+    return res.json({ users: result.rows });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch recipients" });
+  }
+});
+
+app.get("/messagerie/inbox", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 100);
+    const [result, unreadResult] = await Promise.all([
+      query(
+      `
+      SELECT
+        m.*,
+        sender.name AS sender_name,
+        sender.email AS sender_email,
+        recipient.name AS recipient_name,
+        recipient.email AS recipient_email
+      FROM messages m
+      JOIN users sender ON sender.id = m.sender_user_id
+      JOIN users recipient ON recipient.id = m.recipient_user_id
+      WHERE m.recipient_user_id = $1
+      ORDER BY m.created_at DESC
+      LIMIT $2
+      `,
+      [req.user.userId, limit]
+      ),
+      query(
+        `
+        SELECT COUNT(*)::INT AS unread_count
+        FROM messages
+        WHERE recipient_user_id = $1
+          AND read_at IS NULL
+        `,
+        [req.user.userId]
+      )
+    ]);
+
+    const messageIds = result.rows.map((row) => row.id);
+    const attachmentMap = await fetchAttachmentsForMessageIds(messageIds);
+
+    return res.json({
+      unreadCount: unreadResult.rows[0]?.unread_count ?? 0,
+      messages: result.rows.map((row) => sanitizeMessage(row, attachmentMap.get(row.id) || []))
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch inbox" });
+  }
+});
+
+app.post("/messagerie/messages/:id/mark-read", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const result = await query(
+      `
+      UPDATE messages
+      SET read_at = COALESCE(read_at, NOW())
+      WHERE id = $1
+        AND recipient_user_id = $2
+      RETURNING *
+      `,
+      [req.params.id, req.user.userId]
+    );
+
+    const message = result.rows[0];
+    if (!message) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    return res.json({ message });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to mark message as read" });
+  }
+});
+
+app.get("/messagerie/sent", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 100);
+    const result = await query(
+      `
+      SELECT
+        m.*,
+        sender.name AS sender_name,
+        sender.email AS sender_email,
+        recipient.name AS recipient_name,
+        recipient.email AS recipient_email
+      FROM messages m
+      JOIN users sender ON sender.id = m.sender_user_id
+      JOIN users recipient ON recipient.id = m.recipient_user_id
+      WHERE m.sender_user_id = $1
+      ORDER BY m.created_at DESC
+      LIMIT $2
+      `,
+      [req.user.userId, limit]
+    );
+
+    const messageIds = result.rows.map((row) => row.id);
+    const attachmentMap = await fetchAttachmentsForMessageIds(messageIds);
+
+    return res.json({
+      messages: result.rows.map((row) => sanitizeMessage(row, attachmentMap.get(row.id) || []))
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch sent messages" });
+  }
+});
+
+app.post(
+  "/messagerie/messages",
+  authRequired,
+  requireRole(["ADMIN", "RECEPTION"]),
+  messageUpload.single("attachment"),
+  async (req, res) => {
+  try {
+    const { recipientUserId, subject, content } = req.body || {};
+
+    if (!recipientUserId || !subject || !content) {
+      if (req.file?.path) {
+        fs.unlink(req.file.path, () => undefined);
+      }
+      return res.status(400).json({ error: "recipientUserId, subject, and content are required" });
+    }
+
+    const recipientResult = await query(
+      `
+      SELECT id
+      FROM users
+      WHERE id = $1
+        AND is_active = TRUE
+      `,
+      [recipientUserId]
+    );
+
+    if (!recipientResult.rows[0]) {
+      if (req.file?.path) {
+        fs.unlink(req.file.path, () => undefined);
+      }
+      return res.status(404).json({ error: "Recipient not found" });
+    }
+
+    const result = await query(
+      `
+      INSERT INTO messages (sender_user_id, recipient_user_id, subject, content)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+      `,
+      [req.user.userId, Number(recipientUserId), subject.trim(), content.trim()]
+    );
+
+    const message = result.rows[0];
+
+    if (req.file) {
+      await query(
+        `
+        INSERT INTO message_attachments (message_id, file_name, mime_type, size_bytes, storage_path)
+        VALUES ($1, $2, $3, $4, $5)
+        `,
+        [
+          message.id,
+          req.file.originalname,
+          req.file.mimetype || "application/octet-stream",
+          req.file.size,
+          req.file.path
+        ]
+      );
+    }
+
+    return res.status(201).json({ message });
+  } catch (error) {
+    if (req.file?.path) {
+      fs.unlink(req.file.path, () => undefined);
+    }
+    return res.status(500).json({ error: "Failed to send message" });
+  }
+});
+
+app.get(
+  "/messagerie/messages/:messageId/attachments/:attachmentId/download",
+  authRequired,
+  requireRole(["ADMIN", "RECEPTION"]),
+  async (req, res) => {
+    try {
+      const result = await query(
+        `
+        SELECT
+          a.*,
+          m.sender_user_id,
+          m.recipient_user_id
+        FROM message_attachments a
+        JOIN messages m ON m.id = a.message_id
+        WHERE a.id = $1
+          AND a.message_id = $2
+        `,
+        [req.params.attachmentId, req.params.messageId]
+      );
+
+      const attachment = result.rows[0];
+      if (!attachment) {
+        return res.status(404).json({ error: "Attachment not found" });
+      }
+
+      const isParticipant =
+        Number(attachment.sender_user_id) === Number(req.user.userId) ||
+        Number(attachment.recipient_user_id) === Number(req.user.userId);
+
+      if (!isParticipant) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      if (!fs.existsSync(attachment.storage_path)) {
+        return res.status(404).json({ error: "Attachment file missing" });
+      }
+
+      return res.download(attachment.storage_path, attachment.file_name);
+    } catch (error) {
+      return res.status(500).json({ error: "Failed to download attachment" });
+    }
+  }
+);
+
 app.get("/reception/documents/recent", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
     const limit = Math.min(Number.parseInt(req.query.limit, 10) || 10, 50);
@@ -345,6 +652,112 @@ app.get("/reception/documents/recent", authRequired, requireRole(["ADMIN", "RECE
     });
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch reception documents" });
+  }
+});
+
+app.get("/reception/dashboard/stats", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const [entriesTodayResult, toDistributeResult, toScanResult, pendingBordereauxResult, distributedThisMonthResult] = await Promise.all([
+      query(
+        `
+        SELECT COUNT(*)::INT AS value
+        FROM reception_documents
+        WHERE created_at::date = CURRENT_DATE
+        `
+      ),
+      query(
+        `
+        SELECT COUNT(*)::INT AS value
+        FROM reception_documents
+        WHERE status <> 'Remis'
+        `
+      ),
+      query(
+        `
+        SELECT COUNT(*)::INT AS value
+        FROM reception_documents d
+        LEFT JOIN reception_bordereaux b ON b.document_id = d.id
+        WHERE b.id IS NULL
+        `
+      ),
+      query(
+        `
+        SELECT COUNT(*)::INT AS value
+        FROM reception_bordereaux
+        WHERE status <> 'Signé'
+        `
+      ),
+      query(
+        `
+        SELECT COUNT(*)::INT AS value
+        FROM reception_documents
+        WHERE status = 'Remis'
+          AND delivered_at >= date_trunc('month', CURRENT_DATE)
+          AND delivered_at < (date_trunc('month', CURRENT_DATE) + INTERVAL '1 month')
+        `
+      )
+    ]);
+
+    return res.json({
+      entriesToday: entriesTodayResult.rows[0]?.value ?? 0,
+      toScan: toScanResult.rows[0]?.value ?? 0,
+      toDistribute: toDistributeResult.rows[0]?.value ?? 0,
+      pendingBordereaux: pendingBordereauxResult.rows[0]?.value ?? 0,
+      distributedThisMonth: distributedThisMonthResult.rows[0]?.value ?? 0
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch reception dashboard stats" });
+  }
+});
+
+app.get("/reception/search", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const rawQuery = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 30, 1), 100);
+
+    if (!rawQuery) {
+      return res.json({ results: [] });
+    }
+
+    const likeQuery = `%${rawQuery}%`;
+    const result = await query(
+      `
+      SELECT
+        d.id,
+        d.number,
+        d.subject,
+        d.status,
+        d.sender,
+        d.category,
+        d.created_at,
+        d.delivered_at
+      FROM reception_documents d
+      WHERE d.number ILIKE $1
+         OR d.subject ILIKE $1
+         OR d.sender ILIKE $1
+         OR d.category ILIKE $1
+         OR d.confidentiality ILIKE $1
+         OR d.status ILIKE $1
+      ORDER BY d.created_at DESC
+      LIMIT $2
+      `,
+      [likeQuery, limit]
+    );
+
+    const results = result.rows.map((row) => ({
+      id: row.id,
+      number: row.number,
+      subject: row.subject,
+      status: row.status,
+      sender: row.sender,
+      category: row.category,
+      createdAt: row.created_at,
+      deliveredAt: row.delivered_at
+    }));
+
+    return res.json({ results });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to search reception documents" });
   }
 });
 
