@@ -89,6 +89,30 @@ const sanitizeReceptionDocument = (document) => ({
   createdAt: document.created_at
 });
 
+const sanitizeDistributionDocument = (document) => ({
+  id: document.id,
+  number: document.number,
+  subject: document.subject,
+  status: document.status,
+  createdAt: document.created_at,
+  deliveredAt: document.delivered_at,
+  hasBordereau: Boolean(document.bordereau_id),
+  bordereauNumber: document.bordereau_number || null
+});
+
+const sanitizeBordereau = (bordereau) => ({
+  id: bordereau.id,
+  number: bordereau.number,
+  status: bordereau.status === "Non signÃ©" ? "Non signé" : bordereau.status,
+  generatedAt: bordereau.generated_at,
+  signedAt: bordereau.signed_at,
+  document: {
+    id: bordereau.document_id,
+    number: bordereau.document_number,
+    subject: bordereau.document_subject
+  }
+});
+
 app.get("/", (req, res) => {
   res.send("API is running");
 });
@@ -275,7 +299,8 @@ app.delete("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) 
 app.get("/reception/documents/recent", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
     const limit = Math.min(Number.parseInt(req.query.limit, 10) || 10, 50);
-    const result = await query(
+    const [result, totalResult] = await Promise.all([
+      query(
       `
       SELECT *
       FROM reception_documents
@@ -283,9 +308,14 @@ app.get("/reception/documents/recent", authRequired, requireRole(["ADMIN", "RECE
       LIMIT $1
       `,
       [limit]
-    );
+      ),
+      query(`SELECT COUNT(*)::INT AS total_count FROM reception_documents`)
+    ]);
 
-    return res.json({ documents: result.rows.map(sanitizeReceptionDocument) });
+    return res.json({
+      totalCount: totalResult.rows[0]?.total_count ?? 0,
+      documents: result.rows.map(sanitizeReceptionDocument)
+    });
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch reception documents" });
   }
@@ -361,6 +391,142 @@ app.post("/reception/documents", authRequired, requireRole(["ADMIN", "RECEPTION"
       return res.status(409).json({ error: "A document number conflict occurred. Please retry." });
     }
     return res.status(500).json({ error: "Failed to create reception document" });
+  }
+});
+
+app.get("/reception/distributions/overview", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const [toDistributeResult, distributedTodayResult] = await Promise.all([
+      query(
+      `
+      SELECT d.*, b.id AS bordereau_id, b.number AS bordereau_number
+      FROM reception_documents d
+      LEFT JOIN reception_bordereaux b ON b.document_id = d.id
+      WHERE d.status <> 'Remis'
+      ORDER BY d.created_at DESC
+      `
+      ),
+      query(
+      `
+      SELECT d.*, b.id AS bordereau_id, b.number AS bordereau_number
+      FROM reception_documents d
+      LEFT JOIN reception_bordereaux b ON b.document_id = d.id
+      WHERE d.status = 'Remis'
+        AND d.delivered_at::date = CURRENT_DATE
+      ORDER BY d.delivered_at DESC, d.created_at DESC
+      `
+      )
+    ]);
+
+    return res.json({
+      toDistributeCount: toDistributeResult.rows.length,
+      distributedTodayCount: distributedTodayResult.rows.length,
+      toDistribute: toDistributeResult.rows.map(sanitizeDistributionDocument),
+      distributedToday: distributedTodayResult.rows.map(sanitizeDistributionDocument)
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch distributions overview" });
+  }
+});
+
+app.post("/reception/distributions/:id/mark-delivered", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const result = await query(
+      `
+      UPDATE reception_documents
+      SET status = 'Remis',
+          delivered_at = NOW()
+      WHERE id = $1
+      RETURNING *
+      `,
+      [req.params.id]
+    );
+
+    const document = result.rows[0];
+    if (!document) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+
+    return res.json({ document: sanitizeReceptionDocument(document) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to mark document as delivered" });
+  }
+});
+
+app.post("/reception/distributions/:id/generate-bordereau", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const documentResult = await query("SELECT * FROM reception_documents WHERE id = $1", [req.params.id]);
+    const document = documentResult.rows[0];
+
+    if (!document) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+
+    const existingResult = await query(
+      "SELECT * FROM reception_bordereaux WHERE document_id = $1",
+      [req.params.id]
+    );
+
+    if (existingResult.rows[0]) {
+      return res.json({ bordereau: existingResult.rows[0], alreadyExists: true });
+    }
+
+    const year = new Date().getFullYear();
+    const sequenceResult = await query(
+      `
+      SELECT COALESCE(MAX(SUBSTRING(number FROM 10)::INT), 0) + 1 AS next_seq
+      FROM reception_bordereaux
+      WHERE number LIKE $1
+      `,
+      [`BORD-${year}-%`]
+    );
+
+    const nextSequence = String(sequenceResult.rows[0].next_seq).padStart(4, "0");
+    const bordereauNumber = `BORD-${year}-${nextSequence}`;
+
+    const bordereauResult = await query(
+      `
+      INSERT INTO reception_bordereaux (document_id, number)
+      VALUES ($1, $2)
+      RETURNING *
+      `,
+      [req.params.id, bordereauNumber]
+    );
+
+    return res.status(201).json({ bordereau: bordereauResult.rows[0], alreadyExists: false });
+  } catch (error) {
+    if (error.code === "23505") {
+      return res.status(409).json({ error: "A bordereau conflict occurred. Please retry." });
+    }
+    return res.status(500).json({ error: "Failed to generate bordereau" });
+  }
+});
+
+app.get("/reception/bordereaux", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+  try {
+    const result = await query(
+      `
+      SELECT
+        b.*,
+        d.number AS document_number,
+        d.subject AS document_subject
+      FROM reception_bordereaux b
+      JOIN reception_documents d ON d.id = b.document_id
+      ORDER BY b.generated_at DESC
+      `
+    );
+
+    const signedCount = result.rows.filter((item) => item.status === "Signé").length;
+    const totalCount = result.rows.length;
+
+    return res.json({
+      totalCount,
+      signedCount,
+      unsignedCount: totalCount - signedCount,
+      bordereaux: result.rows.map(sanitizeBordereau)
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch bordereaux" });
   }
 });
 
