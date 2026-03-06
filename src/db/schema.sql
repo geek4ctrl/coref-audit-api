@@ -53,6 +53,30 @@ ALTER TABLE reception_documents
   ADD COLUMN IF NOT EXISTS assistant_treated_at TIMESTAMPTZ;
 
 ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS chief_decision TEXT;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS chief_assigned_to_type TEXT;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS chief_assigned_to_value TEXT;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS chief_priority TEXT;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS chief_sla_days INTEGER;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS chief_instruction TEXT;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS chief_decided_at TIMESTAMPTZ;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS chief_decided_by_user_id INTEGER REFERENCES users(id);
+
+ALTER TABLE reception_documents
   ALTER COLUMN status SET DEFAULT U&'Document cr\00E9\00E9';
 
 UPDATE reception_documents
@@ -72,6 +96,9 @@ CREATE INDEX IF NOT EXISTS reception_documents_assistant_status_idx
 
 CREATE INDEX IF NOT EXISTS reception_documents_assistant_priority_idx
   ON reception_documents(assistant_priority);
+
+CREATE INDEX IF NOT EXISTS reception_documents_chief_decision_idx
+  ON reception_documents(chief_decision);
 
 CREATE TABLE IF NOT EXISTS reception_bordereaux (
   id SERIAL PRIMARY KEY,
