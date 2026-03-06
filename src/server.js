@@ -159,7 +159,8 @@ const sanitizeAssistantDocument = (document) => {
     lastActionNote: document.assistant_note || "Mise à jour en attente",
     delay: document.delay_label,
     delayTone: isDelayed ? "danger" : "muted",
-    priority: document.assistant_priority
+    priority: document.assistant_priority,
+    chiefDecision: document.chief_decision || null
   };
 };
 
@@ -1024,8 +1025,8 @@ app.get("/assistant/dashboard", authRequired, requireRole(["ADMIN", "ASSISTANT_C
               AND received_date < CURRENT_DATE - INTERVAL '3 days'
           )::INT AS delayed_count,
           COUNT(*) FILTER (
-            WHERE assistant_status = 'En cours'
-              AND received_date < CURRENT_DATE - INTERVAL '7 days'
+            WHERE (assistant_status = 'En cours' AND received_date < CURRENT_DATE - INTERVAL '7 days')
+               OR (chief_decision = 'BLOQUER' AND assistant_status <> 'Terminé')
           )::INT AS blocked_count
         FROM reception_documents
         `
@@ -1182,6 +1183,111 @@ app.patch("/assistant/documents/:id/mark-treated", authRequired, requireRole(["A
     });
   } catch (error) {
     return res.status(500).json({ error: "Failed to mark document as treated" });
+  }
+});
+
+app.patch("/chief/documents/:id/decision", authRequired, requireRole(["ADMIN", "CHEF_SG"]), async (req, res) => {
+  try {
+    const {
+      decision,
+      assignedToType,
+      assignedToValue,
+      priority,
+      slaDays,
+      instruction
+    } = req.body || {};
+
+    const normalizedDecision = typeof decision === "string" ? decision.trim().toUpperCase() : "";
+    const allowedDecisions = ["ASSIGN_PILIER", "ASSIGN_SERVICE", "SEND_SECRETARIAT", "CLOSE", "BLOQUER"];
+
+    if (!allowedDecisions.includes(normalizedDecision)) {
+      return res.status(400).json({ error: "Invalid decision" });
+    }
+
+    if ((normalizedDecision === "ASSIGN_PILIER" || normalizedDecision === "ASSIGN_SERVICE") && (!assignedToValue || !String(assignedToValue).trim())) {
+      return res.status(400).json({ error: "assignedToValue is required for assignment decisions" });
+    }
+
+    const normalizedAssignedType =
+      normalizedDecision === "ASSIGN_PILIER"
+        ? "PILIER"
+        : normalizedDecision === "ASSIGN_SERVICE"
+          ? "SERVICE"
+          : normalizedDecision === "SEND_SECRETARIAT"
+            ? "SECRETARIAT"
+            : null;
+
+    const normalizedAssignedValue =
+      normalizedDecision === "ASSIGN_PILIER" || normalizedDecision === "ASSIGN_SERVICE"
+        ? String(assignedToValue || "").trim() || null
+        : normalizedDecision === "SEND_SECRETARIAT"
+          ? "SECRETARIAT"
+          : null;
+
+    const normalizedPriority = typeof priority === "string" && priority.trim() ? priority.trim() : null;
+    const normalizedInstruction = typeof instruction === "string" && instruction.trim() ? instruction.trim() : null;
+    const normalizedSlaDays = Number.isFinite(Number(slaDays)) ? Number(slaDays) : null;
+
+    if (normalizedSlaDays !== null && (normalizedSlaDays < 0 || normalizedSlaDays > 365)) {
+      return res.status(400).json({ error: "slaDays must be between 0 and 365" });
+    }
+
+    const assistantStatus = normalizedDecision === "CLOSE" ? "Terminé" : "En cours";
+    const shouldSetTreatedAt = normalizedDecision === "CLOSE";
+
+    const result = await query(
+      `
+      UPDATE reception_documents
+      SET chief_decision = $1,
+          chief_assigned_to_type = $2,
+          chief_assigned_to_value = $3,
+          chief_priority = COALESCE($4, chief_priority),
+          chief_sla_days = $5,
+          chief_instruction = COALESCE($6, chief_instruction),
+          chief_decided_at = NOW(),
+          chief_decided_by_user_id = $7,
+          assistant_status = $8,
+          assistant_treated_at = CASE WHEN $9 THEN NOW() ELSE assistant_treated_at END,
+          assistant_note = COALESCE($10, assistant_note)
+      WHERE id = $11
+      RETURNING id, number, assistant_status, chief_decision, chief_assigned_to_type, chief_assigned_to_value, chief_priority, chief_sla_days, chief_instruction, chief_decided_at
+      `,
+      [
+        normalizedDecision,
+        normalizedAssignedType,
+        normalizedAssignedValue,
+        normalizedPriority,
+        normalizedSlaDays,
+        normalizedInstruction,
+        req.user.userId,
+        assistantStatus,
+        shouldSetTreatedAt,
+        normalizedDecision === "BLOQUER" ? "En attente d'informations complémentaires" : null,
+        req.params.id
+      ]
+    );
+
+    const document = result.rows[0];
+    if (!document) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+
+    return res.json({
+      document: {
+        id: document.id,
+        number: document.number,
+        assistantStatus: document.assistant_status,
+        decision: document.chief_decision,
+        assignedToType: document.chief_assigned_to_type,
+        assignedToValue: document.chief_assigned_to_value,
+        priority: document.chief_priority,
+        slaDays: document.chief_sla_days,
+        instruction: document.chief_instruction,
+        decidedAt: document.chief_decided_at
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to save chief decision" });
   }
 });
 
