@@ -3,15 +3,36 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cors from "cors";
 import multer from "multer";
+import swaggerJSDoc from "swagger-jsdoc";
+import swaggerUi from "swagger-ui-express";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { query } from "./db.js";
+import { query } from "./config/database.ts";
 import "dotenv/config";
 
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
+
+const swaggerSpec = swaggerJSDoc({
+  definition: {
+    openapi: "3.0.0",
+    info: {
+      title: "Coref Audit API",
+      version: "1.0.0"
+    },
+    servers: [
+      {
+        url: process.env.API_BASE_URL || "http://localhost:3000"
+      }
+    ]
+  },
+  apis: ["./src/server.js"]
+});
+
+app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.get("/docs.json", (_req, res) => res.json(swaggerSpec));
 
 const messageUploadsDir = path.resolve(process.cwd(), "uploads", "messages");
 if (!fs.existsSync(messageUploadsDir)) {
@@ -220,10 +241,34 @@ app.get("/", (req, res) => {
   res.send("API is running");
 });
 
+/**
+ * @openapi
+ * /:
+ *   get:
+ *     summary: API status
+ *     tags:
+ *       - Health
+ *     responses:
+ *       200:
+ *         description: API is running
+ */
+
 app.get("/health/db", async (req, res) => {
   const result = await query("SELECT NOW() as now");
   res.json(result.rows[0]);
 });
+
+/**
+ * @openapi
+ * /health/db:
+ *   get:
+ *     summary: Database connectivity check
+ *     tags:
+ *       - Health
+ *     responses:
+ *       200:
+ *         description: Database reachable
+ */
 
 app.post("/auth/register", async (req, res) => {
   try {
@@ -297,6 +342,18 @@ app.get("/users", authRequired, requireRole(["ADMIN"]), async (req, res) => {
   }
 });
 
+/**
+ * @openapi
+ * /users:
+ *   get:
+ *     summary: List users
+ *     tags:
+ *       - Users
+ *     responses:
+ *       200:
+ *         description: Users list
+ */
+
 app.get("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) => {
   try {
     const result = await query("SELECT * FROM users WHERE id = $1", [req.params.id]);
@@ -309,6 +366,26 @@ app.get("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) => 
     return res.status(500).json({ error: "Failed to fetch user" });
   }
 });
+
+/**
+ * @openapi
+ * /users/{id}:
+ *   get:
+ *     summary: Get a user by id
+ *     tags:
+ *       - Users
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: User details
+ *       404:
+ *         description: User not found
+ */
 
 app.post("/users", authRequired, requireRole(["ADMIN"]), async (req, res) => {
   try {
@@ -339,6 +416,42 @@ app.post("/users", authRequired, requireRole(["ADMIN"]), async (req, res) => {
     return res.status(500).json({ error: "Failed to create user" });
   }
 });
+
+/**
+ * @openapi
+ * /users:
+ *   post:
+ *     summary: Create a user
+ *     tags:
+ *       - Users
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - email
+ *               - password
+ *               - role
+ *             properties:
+ *               name:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *               role:
+ *                 type: string
+ *               serviceId:
+ *                 type: integer
+ *               isActive:
+ *                 type: boolean
+ *     responses:
+ *       201:
+ *         description: User created
+ */
 
 app.patch("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) => {
   try {
@@ -387,6 +500,43 @@ app.patch("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) =
   }
 });
 
+/**
+ * @openapi
+ * /users/{id}:
+ *   patch:
+ *     summary: Update a user
+ *     tags:
+ *       - Users
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *               role:
+ *                 type: string
+ *               serviceId:
+ *                 type: integer
+ *               isActive:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: User updated
+ */
+
 app.delete("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) => {
   try {
     const result = await query("DELETE FROM users WHERE id = $1 RETURNING id", [req.params.id]);
@@ -398,6 +548,26 @@ app.delete("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) 
     return res.status(500).json({ error: "Failed to delete user" });
   }
 });
+
+/**
+ * @openapi
+ * /users/{id}:
+ *   delete:
+ *     summary: Delete a user
+ *     tags:
+ *       - Users
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       204:
+ *         description: Deleted
+ *       404:
+ *         description: User not found
+ */
 
 app.get("/messagerie/users", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
@@ -417,6 +587,18 @@ app.get("/messagerie/users", authRequired, requireRole(["ADMIN", "RECEPTION"]), 
     return res.status(500).json({ error: "Failed to fetch recipients" });
   }
 });
+
+/**
+ * @openapi
+ * /messagerie/users:
+ *   get:
+ *     summary: List active messaging users
+ *     tags:
+ *       - Messaging
+ *     responses:
+ *       200:
+ *         description: Users list
+ */
 
 app.get("/messagerie/inbox", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
@@ -462,6 +644,23 @@ app.get("/messagerie/inbox", authRequired, requireRole(["ADMIN", "RECEPTION"]), 
   }
 });
 
+/**
+ * @openapi
+ * /messagerie/inbox:
+ *   get:
+ *     summary: List inbox messages
+ *     tags:
+ *       - Messaging
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Inbox messages
+ */
+
 app.post("/messagerie/messages/:id/mark-read", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
     const result = await query(
@@ -485,6 +684,24 @@ app.post("/messagerie/messages/:id/mark-read", authRequired, requireRole(["ADMIN
     return res.status(500).json({ error: "Failed to mark message as read" });
   }
 });
+
+/**
+ * @openapi
+ * /messagerie/messages/{id}/mark-read:
+ *   post:
+ *     summary: Mark a message as read
+ *     tags:
+ *       - Messaging
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Updated message
+ */
 
 app.get("/messagerie/sent", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
@@ -517,6 +734,23 @@ app.get("/messagerie/sent", authRequired, requireRole(["ADMIN", "RECEPTION"]), a
     return res.status(500).json({ error: "Failed to fetch sent messages" });
   }
 });
+
+/**
+ * @openapi
+ * /messagerie/sent:
+ *   get:
+ *     summary: List sent messages
+ *     tags:
+ *       - Messaging
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Sent messages
+ */
 
 app.post(
   "/messagerie/messages",
@@ -631,6 +865,63 @@ app.get(
   }
 );
 
+/**
+ * @openapi
+ * /messagerie/messages:
+ *   post:
+ *     summary: Send a message
+ *     tags:
+ *       - Messaging
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - recipientUserId
+ *               - subject
+ *               - content
+ *             properties:
+ *               recipientUserId:
+ *                 type: integer
+ *               subject:
+ *                 type: string
+ *               content:
+ *                 type: string
+ *               attachment:
+ *                 type: string
+ *                 format: binary
+ *     responses:
+ *       201:
+ *         description: Message sent
+ */
+
+/**
+ * @openapi
+ * /messagerie/messages/{messageId}/attachments/{attachmentId}/download:
+ *   get:
+ *     summary: Download a message attachment
+ *     tags:
+ *       - Messaging
+ *     parameters:
+ *       - in: path
+ *         name: messageId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *       - in: path
+ *         name: attachmentId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: File download
+ *       404:
+ *         description: Not found
+ */
+
 app.get("/reception/documents/recent", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
     const limit = Math.min(Number.parseInt(req.query.limit, 10) || 10, 50);
@@ -655,6 +946,23 @@ app.get("/reception/documents/recent", authRequired, requireRole(["ADMIN", "RECE
     return res.status(500).json({ error: "Failed to fetch reception documents" });
   }
 });
+
+/**
+ * @openapi
+ * /reception/documents/recent:
+ *   get:
+ *     summary: List recent reception documents
+ *     tags:
+ *       - Reception
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Recent documents
+ */
 
 app.get("/reception/dashboard/stats", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
@@ -711,6 +1019,18 @@ app.get("/reception/dashboard/stats", authRequired, requireRole(["ADMIN", "RECEP
   }
 });
 
+/**
+ * @openapi
+ * /reception/dashboard/stats:
+ *   get:
+ *     summary: Reception dashboard stats
+ *     tags:
+ *       - Reception
+ *     responses:
+ *       200:
+ *         description: Dashboard stats
+ */
+
 app.get("/reception/search", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
     const rawQuery = typeof req.query.q === "string" ? req.query.q.trim() : "";
@@ -761,6 +1081,27 @@ app.get("/reception/search", authRequired, requireRole(["ADMIN", "RECEPTION"]), 
     return res.status(500).json({ error: "Failed to search reception documents" });
   }
 });
+
+/**
+ * @openapi
+ * /reception/search:
+ *   get:
+ *     summary: Search reception documents
+ *     tags:
+ *       - Reception
+ *     parameters:
+ *       - in: query
+ *         name: q
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Search results
+ */
 
 app.post("/reception/documents", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
@@ -835,6 +1176,46 @@ app.post("/reception/documents", authRequired, requireRole(["ADMIN", "RECEPTION"
   }
 });
 
+/**
+ * @openapi
+ * /reception/documents:
+ *   post:
+ *     summary: Create a reception document
+ *     tags:
+ *       - Reception
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - documentType
+ *               - receivedDate
+ *               - sender
+ *               - subject
+ *               - category
+ *               - confidentiality
+ *             properties:
+ *               documentType:
+ *                 type: string
+ *               receivedDate:
+ *                 type: string
+ *               sender:
+ *                 type: string
+ *               subject:
+ *                 type: string
+ *               category:
+ *                 type: string
+ *               confidentiality:
+ *                 type: string
+ *               observations:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Document created
+ */
+
 app.get("/reception/distributions/overview", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
     const [toDistributeResult, distributedTodayResult] = await Promise.all([
@@ -870,6 +1251,18 @@ app.get("/reception/distributions/overview", authRequired, requireRole(["ADMIN",
   }
 });
 
+/**
+ * @openapi
+ * /reception/distributions/overview:
+ *   get:
+ *     summary: Distribution overview
+ *     tags:
+ *       - Reception
+ *     responses:
+ *       200:
+ *         description: Distribution overview
+ */
+
 app.post("/reception/distributions/:id/mark-delivered", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
     const result = await query(
@@ -893,6 +1286,24 @@ app.post("/reception/distributions/:id/mark-delivered", authRequired, requireRol
     return res.status(500).json({ error: "Failed to mark document as delivered" });
   }
 });
+
+/**
+ * @openapi
+ * /reception/distributions/{id}/mark-delivered:
+ *   post:
+ *     summary: Mark document delivered
+ *     tags:
+ *       - Reception
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Document updated
+ */
 
 app.post("/reception/distributions/:id/generate-bordereau", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
@@ -943,6 +1354,24 @@ app.post("/reception/distributions/:id/generate-bordereau", authRequired, requir
   }
 });
 
+/**
+ * @openapi
+ * /reception/distributions/{id}/generate-bordereau:
+ *   post:
+ *     summary: Generate a bordereau
+ *     tags:
+ *       - Reception
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       201:
+ *         description: Bordereau created
+ */
+
 app.get("/reception/bordereaux", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
     const result = await query(
@@ -970,6 +1399,18 @@ app.get("/reception/bordereaux", authRequired, requireRole(["ADMIN", "RECEPTION"
     return res.status(500).json({ error: "Failed to fetch bordereaux" });
   }
 });
+
+/**
+ * @openapi
+ * /reception/bordereaux:
+ *   get:
+ *     summary: List bordereaux
+ *     tags:
+ *       - Reception
+ *     responses:
+ *       200:
+ *         description: Bordereaux list
+ */
 
 app.post("/reception/bordereaux/:id/mark-signed", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
   try {
@@ -1002,6 +1443,24 @@ app.post("/reception/bordereaux/:id/mark-signed", authRequired, requireRole(["AD
     return res.status(500).json({ error: "Failed to mark bordereau as signed" });
   }
 });
+
+/**
+ * @openapi
+ * /reception/bordereaux/{id}/mark-signed:
+ *   post:
+ *     summary: Mark bordereau signed
+ *     tags:
+ *       - Reception
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Bordereau updated
+ */
 
 app.get("/assistant/dashboard", authRequired, requireRole(["ADMIN", "ASSISTANT_CHEF", "CHEF_SG"]), async (req, res) => {
   try {
@@ -1082,6 +1541,23 @@ app.get("/assistant/dashboard", authRequired, requireRole(["ADMIN", "ASSISTANT_C
   }
 });
 
+/**
+ * @openapi
+ * /assistant/dashboard:
+ *   get:
+ *     summary: Assistant dashboard
+ *     tags:
+ *       - Assistant
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Dashboard data
+ */
+
 app.patch("/assistant/documents/:id/classify", authRequired, requireRole(["ADMIN", "ASSISTANT_CHEF", "CHEF_SG"]), async (req, res) => {
   try {
     const { priority, note, status } = req.body || {};
@@ -1126,6 +1602,37 @@ app.patch("/assistant/documents/:id/classify", authRequired, requireRole(["ADMIN
   }
 });
 
+/**
+ * @openapi
+ * /assistant/documents/{id}/classify:
+ *   patch:
+ *     summary: Classify a document
+ *     tags:
+ *       - Assistant
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               priority:
+ *                 type: string
+ *               note:
+ *                 type: string
+ *               status:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Document updated
+ */
+
 app.patch("/assistant/documents/:id/send-to-chief", authRequired, requireRole(["ADMIN", "ASSISTANT_CHEF", "CHEF_SG"]), async (req, res) => {
   try {
     const result = await query(
@@ -1156,6 +1663,24 @@ app.patch("/assistant/documents/:id/send-to-chief", authRequired, requireRole(["
   }
 });
 
+/**
+ * @openapi
+ * /assistant/documents/{id}/send-to-chief:
+ *   patch:
+ *     summary: Send document to chief
+ *     tags:
+ *       - Assistant
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Document updated
+ */
+
 app.patch("/assistant/documents/:id/mark-treated", authRequired, requireRole(["ADMIN", "ASSISTANT_CHEF", "CHEF_SG"]), async (req, res) => {
   try {
     const result = await query(
@@ -1185,6 +1710,24 @@ app.patch("/assistant/documents/:id/mark-treated", authRequired, requireRole(["A
     return res.status(500).json({ error: "Failed to mark document as treated" });
   }
 });
+
+/**
+ * @openapi
+ * /assistant/documents/{id}/mark-treated:
+ *   patch:
+ *     summary: Mark document treated
+ *     tags:
+ *       - Assistant
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: Document updated
+ */
 
 app.patch("/chief/documents/:id/decision", authRequired, requireRole(["ADMIN", "CHEF_SG"]), async (req, res) => {
   try {
@@ -1291,7 +1834,108 @@ app.patch("/chief/documents/:id/decision", authRequired, requireRole(["ADMIN", "
   }
 });
 
+/**
+ * @openapi
+ * /chief/documents/{id}/decision:
+ *   patch:
+ *     summary: Save chief decision
+ *     tags:
+ *       - Chief
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               decision:
+ *                 type: string
+ *               assignedToType:
+ *                 type: string
+ *               assignedToValue:
+ *                 type: string
+ *               priority:
+ *                 type: string
+ *               slaDays:
+ *                 type: integer
+ *               instruction:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Decision saved
+ */
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Server listening on ${port}`);
 });
+
+/**
+ * @openapi
+ * /auth/register:
+ *   post:
+ *     summary: Register a user
+ *     tags:
+ *       - Auth
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - email
+ *               - password
+ *               - role
+ *             properties:
+ *               name:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *               role:
+ *                 type: string
+ *               serviceId:
+ *                 type: integer
+ *     responses:
+ *       201:
+ *         description: User created
+ *       400:
+ *         description: Validation error
+ */
+
+/**
+ * @openapi
+ * /auth/login:
+ *   post:
+ *     summary: Login
+ *     tags:
+ *       - Auth
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *               - password
+ *             properties:
+ *               email:
+ *                 type: string
+ *               password:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Token issued
+ *       401:
+ *         description: Invalid credentials
+ */
