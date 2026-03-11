@@ -8,7 +8,7 @@ import swaggerUi from "swagger-ui-express";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { query } from "./config/database.ts";
+import { query } from "./config/database.js";
 import "dotenv/config";
 
 const app = express();
