@@ -1834,6 +1834,283 @@ app.patch("/chief/documents/:id/decision", authRequired, requireRole(["ADMIN", "
   }
 });
 
+// ── PILIER ENDPOINTS ──
+
+const sanitizePilierDocument = (doc) => {
+  const statusMap = {
+    ENVOYE: "info",
+    RECU: "info",
+    EN_TRAITEMENT: "warning",
+    FINALISE: "success",
+    ENVOYE_COORDINATEUR: "info",
+    VALIDE: "success",
+    REJETE: "warning"
+  };
+  return {
+    id: doc.id,
+    number: doc.number,
+    object: doc.subject,
+    type: doc.document_type || doc.category,
+    status: doc.pilier_status || "ENVOYE",
+    statusTone: statusMap[doc.pilier_status] || "info",
+    sender: doc.sender,
+    category: doc.category,
+    chiefPriority: doc.chief_priority,
+    chiefInstruction: doc.chief_instruction,
+    chiefSlaDays: doc.chief_sla_days,
+    chiefDecidedAt: doc.chief_decided_at,
+    pilierNote: doc.pilier_note,
+    pilierAcknowledgedAt: doc.pilier_acknowledged_at,
+    pilierStartedAt: doc.pilier_started_at,
+    pilierFinalizedAt: doc.pilier_finalized_at,
+    pilierSentToCoordinatorAt: doc.pilier_sent_to_coordinator_at,
+    coordinatorStatus: doc.coordinator_status,
+    coordinatorComment: doc.coordinator_comment,
+    coordinatorValidatedAt: doc.coordinator_validated_at,
+    coordinatorRejectedAt: doc.coordinator_rejected_at,
+    lastActionAt: doc.pilier_sent_to_coordinator_at || doc.pilier_finalized_at || doc.pilier_started_at || doc.pilier_acknowledged_at || doc.chief_decided_at || doc.created_at,
+    deadline: doc.chief_sla_days && doc.chief_decided_at
+      ? new Date(new Date(doc.chief_decided_at).getTime() + doc.chief_sla_days * 86400000).toISOString()
+      : null,
+    createdAt: doc.created_at
+  };
+};
+
+app.get("/pilier/dashboard", authRequired, requireRole(["ADMIN", "PILIER", "PILIER_COORD"]), async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    let whereClause;
+    let params;
+
+    if (userRole === "ADMIN") {
+      whereClause = "WHERE chief_decision = 'ASSIGN_PILIER'";
+      params = [];
+    } else {
+      whereClause = "WHERE chief_decision = 'ASSIGN_PILIER' AND (pilier_user_id = $1 OR chief_assigned_to_value = $1::TEXT)";
+      params = [userId];
+    }
+
+    const [statsResult, documentsResult] = await Promise.all([
+      query(
+        `SELECT
+          COUNT(*) FILTER (WHERE pilier_status IS NULL OR pilier_status = 'ENVOYE')::INT AS to_receive,
+          COUNT(*) FILTER (WHERE pilier_status IN ('RECU', 'EN_TRAITEMENT'))::INT AS in_progress,
+          COUNT(*) FILTER (WHERE pilier_status = 'ENVOYE_COORDINATEUR')::INT AS at_coordinator,
+          COUNT(*) FILTER (WHERE pilier_status IN ('FINALISE', 'ENVOYE_COORDINATEUR') AND coordinator_status = 'VALIDE')::INT AS done,
+          COUNT(*) FILTER (
+            WHERE pilier_status NOT IN ('FINALISE') OR pilier_status IS NULL
+            AND chief_sla_days IS NOT NULL
+            AND chief_decided_at IS NOT NULL
+            AND chief_decided_at + (chief_sla_days || ' days')::INTERVAL < NOW()
+          )::INT AS late
+        FROM reception_documents
+        ${whereClause}`,
+        params
+      ),
+      query(
+        `SELECT * FROM reception_documents
+        ${whereClause}
+        ORDER BY
+          CASE WHEN pilier_status IS NULL OR pilier_status = 'ENVOYE' THEN 0
+               WHEN pilier_status IN ('RECU', 'EN_TRAITEMENT') THEN 1
+               WHEN pilier_status = 'ENVOYE_COORDINATEUR' THEN 2
+               ELSE 3 END,
+          created_at DESC
+        LIMIT 50`,
+        params
+      )
+    ]);
+
+    const stats = statsResult.rows[0] || {};
+    const categoryMap = {
+      "a-receptionner": (d) => !d.pilier_status || d.pilier_status === "ENVOYE",
+      "en-traitement": (d) => d.pilier_status === "RECU" || d.pilier_status === "EN_TRAITEMENT",
+      "chez-coordinateur": (d) => d.pilier_status === "ENVOYE_COORDINATEUR" || d.pilier_status === "FINALISE",
+      "termines": (d) => d.coordinator_status === "VALIDE"
+    };
+
+    const documents = documentsResult.rows.map((doc) => {
+      const sanitized = sanitizePilierDocument(doc);
+      let category = "a-receptionner";
+      for (const [key, fn] of Object.entries(categoryMap)) {
+        if (fn(doc)) { category = key; break; }
+      }
+      return { ...sanitized, category };
+    });
+
+    return res.json({
+      cards: {
+        toReceive: stats.to_receive || 0,
+        inProgress: stats.in_progress || 0,
+        atCoordinator: stats.at_coordinator || 0,
+        late: stats.late || 0
+      },
+      serviceName: req.user.service_name || "",
+      documents
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch pilier dashboard" });
+  }
+});
+
+app.get("/pilier/documents/:id", authRequired, requireRole(["ADMIN", "PILIER", "PILIER_COORD"]), async (req, res) => {
+  try {
+    const result = await query("SELECT * FROM reception_documents WHERE id = $1", [req.params.id]);
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    return res.json({ document: sanitizePilierDocument(doc) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch document" });
+  }
+});
+
+app.patch("/pilier/documents/:id/acknowledge", authRequired, requireRole(["ADMIN", "PILIER"]), async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE reception_documents
+       SET pilier_status = 'RECU',
+           pilier_acknowledged_at = NOW(),
+           pilier_user_id = COALESCE(pilier_user_id, $2)
+       WHERE id = $1 AND (pilier_status IS NULL OR pilier_status = 'ENVOYE')
+       RETURNING *`,
+      [req.params.id, req.user.id]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found or already acknowledged" });
+    return res.json({ document: sanitizePilierDocument(doc) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to acknowledge document" });
+  }
+});
+
+app.patch("/pilier/documents/:id/start-processing", authRequired, requireRole(["ADMIN", "PILIER"]), async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE reception_documents
+       SET pilier_status = 'EN_TRAITEMENT',
+           pilier_started_at = NOW()
+       WHERE id = $1 AND pilier_status = 'RECU'
+       RETURNING *`,
+      [req.params.id]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found or not in correct state" });
+    return res.json({ document: sanitizePilierDocument(doc) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to start processing" });
+  }
+});
+
+app.patch("/pilier/documents/:id/finalize", authRequired, requireRole(["ADMIN", "PILIER"]), async (req, res) => {
+  try {
+    const { note } = req.body || {};
+    const result = await query(
+      `UPDATE reception_documents
+       SET pilier_status = 'FINALISE',
+           pilier_finalized_at = NOW(),
+           pilier_note = COALESCE($2, pilier_note)
+       WHERE id = $1 AND pilier_status = 'EN_TRAITEMENT'
+       RETURNING *`,
+      [req.params.id, typeof note === "string" ? note.trim() || null : null]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found or not in correct state" });
+    return res.json({ document: sanitizePilierDocument(doc) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to finalize document" });
+  }
+});
+
+app.patch("/pilier/documents/:id/send-to-coordinator", authRequired, requireRole(["ADMIN", "PILIER"]), async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE reception_documents
+       SET pilier_status = 'ENVOYE_COORDINATEUR',
+           pilier_sent_to_coordinator_at = NOW(),
+           coordinator_status = 'EN_ATTENTE_VALIDATION'
+       WHERE id = $1 AND pilier_status = 'FINALISE'
+       RETURNING *`,
+      [req.params.id]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found or not finalized" });
+    return res.json({ document: sanitizePilierDocument(doc) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to send to coordinator" });
+  }
+});
+
+// ── COORDINATOR ENDPOINTS ──
+
+app.get("/coordinator/documents", authRequired, requireRole(["ADMIN", "PILIER_COORD"]), async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT * FROM reception_documents
+       WHERE coordinator_status = 'EN_ATTENTE_VALIDATION'
+       ORDER BY pilier_sent_to_coordinator_at DESC
+       LIMIT 50`
+    );
+    return res.json({ documents: result.rows.map(sanitizePilierDocument) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch coordinator documents" });
+  }
+});
+
+app.patch("/coordinator/documents/:id/validate", authRequired, requireRole(["ADMIN", "PILIER_COORD"]), async (req, res) => {
+  try {
+    const { comment } = req.body || {};
+    const result = await query(
+      `UPDATE reception_documents
+       SET coordinator_status = 'VALIDE',
+           coordinator_validated_at = NOW(),
+           coordinator_comment = $2,
+           coordinator_user_id = $3,
+           assistant_status = U&'\\00C0 traiter'
+       WHERE id = $1 AND coordinator_status = 'EN_ATTENTE_VALIDATION'
+       RETURNING *`,
+      [
+        req.params.id,
+        typeof comment === "string" ? comment.trim() || null : null,
+        req.user.id
+      ]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found or not pending validation" });
+    return res.json({ document: sanitizePilierDocument(doc) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to validate document" });
+  }
+});
+
+app.patch("/coordinator/documents/:id/reject", authRequired, requireRole(["ADMIN", "PILIER_COORD"]), async (req, res) => {
+  try {
+    const { comment } = req.body || {};
+    if (!comment || !comment.trim()) {
+      return res.status(400).json({ error: "A comment is required when rejecting" });
+    }
+    const result = await query(
+      `UPDATE reception_documents
+       SET coordinator_status = 'REJETE',
+           coordinator_rejected_at = NOW(),
+           coordinator_comment = $2,
+           coordinator_user_id = $3,
+           pilier_status = 'EN_TRAITEMENT',
+           pilier_finalized_at = NULL,
+           pilier_sent_to_coordinator_at = NULL
+       WHERE id = $1 AND coordinator_status = 'EN_ATTENTE_VALIDATION'
+       RETURNING *`,
+      [req.params.id, comment.trim(), req.user.id]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found or not pending validation" });
+    return res.json({ document: sanitizePilierDocument(doc) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to reject document" });
+  }
+});
+
 /**
  * @openapi
  * /chief/documents/{id}/decision:
