@@ -164,3 +164,50 @@ CREATE TRIGGER users_set_updated_at
 BEFORE UPDATE ON users
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
+
+-- Pilier workflow columns
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS pilier_status TEXT;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS pilier_acknowledged_at TIMESTAMPTZ;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS pilier_started_at TIMESTAMPTZ;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS pilier_finalized_at TIMESTAMPTZ;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS pilier_sent_to_coordinator_at TIMESTAMPTZ;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS pilier_note TEXT;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS pilier_user_id INTEGER REFERENCES users(id);
+
+-- Coordinator workflow columns
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS coordinator_status TEXT;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS coordinator_validated_at TIMESTAMPTZ;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS coordinator_rejected_at TIMESTAMPTZ;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS coordinator_comment TEXT;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS coordinator_user_id INTEGER REFERENCES users(id);
+
+CREATE INDEX IF NOT EXISTS reception_documents_pilier_status_idx
+  ON reception_documents(pilier_status);
+
+CREATE INDEX IF NOT EXISTS reception_documents_coordinator_status_idx
+  ON reception_documents(coordinator_status);
+
+CREATE INDEX IF NOT EXISTS reception_documents_pilier_user_idx
+  ON reception_documents(pilier_user_id);
