@@ -2655,6 +2655,261 @@ app.patch("/secretariat/documents/:id/send-to-assistant", authRequired, requireR
   }
 });
 
+// ── DOCUMENTS (General) ──────────────────────────────────────────────
+
+app.get("/documents/search", authRequired, async (req, res) => {
+  try {
+    const rawQuery = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 30, 1), 100);
+
+    if (!rawQuery) {
+      return res.json({ results: [] });
+    }
+
+    const likeQuery = `%${rawQuery}%`;
+    const result = await query(
+      `
+      SELECT
+        d.id,
+        d.number,
+        d.subject,
+        d.status,
+        d.sender,
+        d.category,
+        d.confidentiality,
+        d.document_type,
+        d.assistant_status,
+        d.assistant_priority,
+        d.chief_decision,
+        d.chief_assigned_to_type,
+        d.chief_assigned_to_value,
+        d.chief_priority,
+        d.pilier_status,
+        d.coordinator_status,
+        d.secretariat_status,
+        d.created_at,
+        d.delivered_at,
+        d.chief_decided_at,
+        d.chief_sla_days
+      FROM reception_documents d
+      WHERE d.number ILIKE $1
+         OR d.subject ILIKE $1
+         OR d.sender ILIKE $1
+         OR d.category ILIKE $1
+         OR d.status ILIKE $1
+         OR d.chief_assigned_to_value ILIKE $1
+         OR d.chief_decision ILIKE $1
+         OR d.confidentiality ILIKE $1
+      ORDER BY d.created_at DESC
+      LIMIT $2
+      `,
+      [likeQuery, limit]
+    );
+
+    const results = result.rows.map((row) => {
+      const currentHolder = row.chief_assigned_to_value || row.sender;
+      const holderRole = row.chief_assigned_to_type || "Expéditeur";
+      const lastStatus = row.coordinator_status || row.pilier_status || row.secretariat_status || row.assistant_status || row.status;
+      const priority = row.chief_priority || row.assistant_priority || "Normale";
+      let isLate = false;
+      if (row.chief_decided_at && row.chief_sla_days) {
+        const deadline = new Date(row.chief_decided_at);
+        deadline.setDate(deadline.getDate() + row.chief_sla_days);
+        isLate = deadline < new Date() && !["Traité", "Clôturé", "Validé"].includes(lastStatus);
+      }
+
+      return {
+        id: row.id,
+        number: row.number,
+        subject: row.subject,
+        status: lastStatus,
+        sender: row.sender,
+        category: row.category,
+        documentType: row.document_type,
+        confidentiality: row.confidentiality,
+        priority,
+        currentHolder,
+        holderRole,
+        isLate,
+        createdAt: row.created_at,
+        deliveredAt: row.delivered_at
+      };
+    });
+
+    return res.json({ results });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to search documents" });
+  }
+});
+
+app.get("/documents", authRequired, async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 200);
+    const offset = Math.max(Number.parseInt(req.query.offset, 10) || 0, 0);
+    const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+    const priority = typeof req.query.priority === "string" ? req.query.priority.trim() : "";
+    const category = typeof req.query.category === "string" ? req.query.category.trim() : "";
+    const late = req.query.late;
+
+    const conditions = [];
+    const params = [];
+    let paramIndex = 1;
+
+    if (status) {
+      conditions.push(`(d.status = $${paramIndex} OR d.assistant_status = $${paramIndex} OR d.pilier_status = $${paramIndex} OR d.coordinator_status = $${paramIndex} OR d.secretariat_status = $${paramIndex})`);
+      params.push(status);
+      paramIndex++;
+    }
+    if (priority) {
+      conditions.push(`(d.chief_priority = $${paramIndex} OR d.assistant_priority = $${paramIndex})`);
+      params.push(priority);
+      paramIndex++;
+    }
+    if (category) {
+      conditions.push(`d.category = $${paramIndex}`);
+      params.push(category);
+      paramIndex++;
+    }
+
+    const whereClause = conditions.length > 0 ? "WHERE " + conditions.join(" AND ") : "";
+
+    const result = await query(
+      `
+      SELECT
+        d.id,
+        d.number,
+        d.subject,
+        d.status,
+        d.sender,
+        d.category,
+        d.confidentiality,
+        d.document_type,
+        d.assistant_status,
+        d.assistant_priority,
+        d.chief_decision,
+        d.chief_assigned_to_type,
+        d.chief_assigned_to_value,
+        d.chief_priority,
+        d.chief_sla_days,
+        d.chief_decided_at,
+        d.pilier_status,
+        d.coordinator_status,
+        d.secretariat_status,
+        d.created_at,
+        d.delivered_at
+      FROM reception_documents d
+      ${whereClause}
+      ORDER BY d.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+      `,
+      [...params, limit, offset]
+    );
+
+    const countResult = await query(
+      `SELECT COUNT(*) as total FROM reception_documents d ${whereClause}`,
+      params
+    );
+
+    const documents = result.rows.map((row) => {
+      const currentHolder = row.chief_assigned_to_value || row.sender;
+      const holderRole = row.chief_assigned_to_type || "Expéditeur";
+      const lastStatus = row.coordinator_status || row.pilier_status || row.secretariat_status || row.assistant_status || row.status;
+      const prio = row.chief_priority || row.assistant_priority || "Normale";
+      let isLate = false;
+      let delayDays = 0;
+      if (row.chief_decided_at && row.chief_sla_days) {
+        const deadline = new Date(row.chief_decided_at);
+        deadline.setDate(deadline.getDate() + row.chief_sla_days);
+        const diff = Math.floor((Date.now() - deadline.getTime()) / 86400000);
+        if (diff > 0 && !["Traité", "Clôturé", "Validé"].includes(lastStatus)) {
+          isLate = true;
+          delayDays = diff;
+        }
+      }
+
+      return {
+        id: row.id,
+        number: row.number,
+        subject: row.subject,
+        documentType: row.document_type,
+        status: lastStatus,
+        category: row.category,
+        priority: prio,
+        currentHolder,
+        holderRole,
+        isLate,
+        delayDays,
+        createdAt: row.created_at
+      };
+    });
+
+    const filtered = late === "true"
+      ? documents.filter(d => d.isLate)
+      : late === "false"
+        ? documents.filter(d => !d.isLate)
+        : documents;
+
+    return res.json({
+      documents: filtered,
+      total: parseInt(countResult.rows[0].total),
+      limit,
+      offset
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch documents" });
+  }
+});
+
+app.post("/documents", authRequired, requireRole(["ADMIN", "CHEF_SG", "ASSISTANT_CHEF", "SECRETARIAT", "PILIER", "SERVICE_INTERNE"]), async (req, res) => {
+  try {
+    const { documentType, sender, subject, category, confidentiality, observations, priority, slaDays, description } = req.body || {};
+
+    if (!sender || !subject || !category || !confidentiality) {
+      return res.status(400).json({
+        error: "sender, subject, category, and confidentiality are required"
+      });
+    }
+
+    const allowedPriorities = ["Basse", "Normale", "Haute", "Urgente"];
+    const normalizedPriority = typeof priority === "string" && allowedPriorities.includes(priority.trim())
+      ? priority.trim()
+      : "Normale";
+
+    const receivedDate = new Date().toISOString().split("T")[0];
+    const year = new Date().getFullYear();
+    const docType = documentType || category || "NOTE_INTERNE";
+
+    const sequenceResult = await query(
+      `SELECT COALESCE(MAX(SUBSTRING(number FROM 12)::INT), 0) + 1 AS next_seq
+       FROM reception_documents WHERE number LIKE $1`,
+      [`COREF-${year}-%`]
+    );
+
+    const nextSequence = String(sequenceResult.rows[0].next_seq).padStart(4, "0");
+    const number = `COREF-${year}-${nextSequence}`;
+
+    const result = await query(
+      `INSERT INTO reception_documents (
+        number, document_type, received_date, sender, subject, category,
+        confidentiality, observations, assistant_priority, created_by_user_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING *`,
+      [
+        number, docType, receivedDate, sender, subject, category,
+        confidentiality, observations || description || null,
+        normalizedPriority, req.user.userId
+      ]
+    );
+
+    return res.status(201).json({ document: sanitizeReceptionDocument(result.rows[0]) });
+  } catch (error) {
+    if (error.code === "23505") {
+      return res.status(409).json({ error: "A document number conflict occurred. Please retry." });
+    }
+    return res.status(500).json({ error: "Failed to create document" });
+  }
+});
+
 // ── RETARDS (Late documents) ─────────────────────────────────────────
 app.get("/retards", authRequired, requireRole(["ADMIN", "CHEF_SG", "ASSISTANT_CHEF", "AUDITEUR"]), async (req, res) => {
   try {
