@@ -39,9 +39,28 @@ if (!fs.existsSync(messageUploadsDir)) {
   fs.mkdirSync(messageUploadsDir, { recursive: true });
 }
 
+const documentUploadsDir = path.resolve(process.cwd(), "uploads", "documents");
+if (!fs.existsSync(documentUploadsDir)) {
+  fs.mkdirSync(documentUploadsDir, { recursive: true });
+}
+
 const messageUpload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, messageUploadsDir),
+    filename: (_req, file, cb) => {
+      const extension = path.extname(file.originalname || "");
+      const randomSuffix = crypto.randomBytes(8).toString("hex");
+      cb(null, `${Date.now()}-${randomSuffix}${extension}`);
+    }
+  }),
+  limits: {
+    fileSize: 10 * 1024 * 1024
+  }
+});
+
+const documentUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, documentUploadsDir),
     filename: (_req, file, cb) => {
       const extension = path.extname(file.originalname || "");
       const randomSuffix = crypto.randomBytes(8).toString("hex");
@@ -2147,6 +2166,180 @@ app.patch("/coordinator/documents/:id/reject", authRequired, requireRole(["ADMIN
  *       200:
  *         description: Decision saved
  */
+
+// ── Secrétariat endpoints ──
+
+app.get("/secretariat/users", authRequired, requireRole(["ADMIN", "SECRETARIAT", "CHEF_SG", "ASSISTANT_CHEF"]), async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT id, name, role FROM users WHERE is_active = TRUE ORDER BY name`
+    );
+    return res.json({ users: result.rows });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to load users" });
+  }
+});
+
+app.post("/secretariat/send-document", authRequired, requireRole(["ADMIN", "SECRETARIAT"]), documentUpload.single("file"), async (req, res) => {
+  try {
+    const { subject, type, priority, sender, receptionDate, assignTo, processingDelay, comment } = req.body;
+    if (!subject || !assignTo) {
+      return res.status(400).json({ error: "Subject and assignTo are required" });
+    }
+
+    const number = `COREF-${new Date().getFullYear()}-${String(Date.now()).slice(-6)}`;
+    const result = await query(
+      `INSERT INTO reception_documents (number, document_type, received_date, sender, subject, category, confidentiality, status, created_by_user_id, observations)
+       VALUES ($1, $2, COALESCE($3::date, CURRENT_DATE), COALESCE($4, 'Secrétariat'), $5, 'COURRIER_DEPART', 'Normal', 'Document envoyé', $6, $7)
+       RETURNING *`,
+      [
+        number,
+        type || "Courrier d'arrivée",
+        receptionDate || null,
+        sender || null,
+        subject.trim(),
+        req.user.id,
+        comment || null
+      ]
+    );
+
+    return res.status(201).json({ document: { id: result.rows[0].id, number } });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to create and send document", detail: error.message });
+  }
+});
+
+app.post("/secretariat/route-document", authRequired, requireRole(["ADMIN", "SECRETARIAT"]), async (req, res) => {
+  try {
+    const { searchQuery, assignTo, comment } = req.body;
+    if (!searchQuery || !assignTo) {
+      return res.status(400).json({ error: "searchQuery and assignTo are required" });
+    }
+
+    const findResult = await query(
+      `SELECT id FROM reception_documents
+       WHERE number ILIKE $1 OR subject ILIKE $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [`%${searchQuery.trim()}%`]
+    );
+
+    if (findResult.rows.length === 0) {
+      return res.status(404).json({ error: "Document not found" });
+    }
+
+    const docId = findResult.rows[0].id;
+    await query(
+      `UPDATE reception_documents
+       SET status = 'Document envoyé',
+           observations = COALESCE(observations || E'\\n', '') || $2
+       WHERE id = $1`,
+      [docId, comment ? `[Routé] ${comment.trim()}` : '[Routé par secrétariat]']
+    );
+
+    return res.json({ document: { id: docId } });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to route document", detail: error.message });
+  }
+});
+
+app.get("/secretariat/dashboard", authRequired, requireRole(["ADMIN", "SECRETARIAT"]), async (req, res) => {
+  try {
+    const toFormatResult = await query(
+      `SELECT COUNT(*) FROM reception_documents
+       WHERE chief_decision = 'SEND_SECRETARIAT'
+         AND (secretariat_status IS NULL OR secretariat_status = 'A_FORMATER')`
+    );
+    const formattedTodayResult = await query(
+      `SELECT COUNT(*) FROM reception_documents
+       WHERE secretariat_status = 'FORMATE'
+         AND secretariat_formatted_at::date = CURRENT_DATE`
+    );
+    const sentToAssistantResult = await query(
+      `SELECT COUNT(*) FROM reception_documents
+       WHERE secretariat_status = 'ENVOYE_ASSISTANTE'`
+    );
+    const returnedResult = await query(
+      `SELECT COUNT(*) FROM reception_documents
+       WHERE secretariat_status = 'RETOUR_CORRECTION'`
+    );
+
+    const documentsResult = await query(
+      `SELECT id, number, subject, sender, document_type, received_date, status,
+              secretariat_status, created_at
+       FROM reception_documents
+       WHERE chief_decision = 'SEND_SECRETARIAT'
+         AND (secretariat_status IS NULL OR secretariat_status = 'A_FORMATER')
+       ORDER BY created_at DESC
+       LIMIT 20`
+    );
+
+    const documents = documentsResult.rows.map(row => ({
+      id: row.id,
+      number: row.number,
+      object: row.subject,
+      sender: row.sender,
+      owner: row.sender,
+      type: row.document_type,
+      status: row.secretariat_status || "À formater",
+      statusTone: "warning",
+      receivedDate: row.received_date,
+      lastActionAt: row.created_at
+    }));
+
+    return res.json({
+      cards: {
+        toFormat: parseInt(toFormatResult.rows[0].count),
+        formattedToday: parseInt(formattedTodayResult.rows[0].count),
+        sentToAssistant: parseInt(sentToAssistantResult.rows[0].count),
+        returnedForCorrection: parseInt(returnedResult.rows[0].count)
+      },
+      documents
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to load secretariat dashboard", detail: error.message });
+  }
+});
+
+app.patch("/secretariat/documents/:id/format", authRequired, requireRole(["ADMIN", "SECRETARIAT"]), async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE reception_documents
+       SET secretariat_status = 'FORMATE',
+           secretariat_formatted_at = NOW(),
+           secretariat_user_id = $2
+       WHERE id = $1
+         AND chief_decision = 'SEND_SECRETARIAT'
+         AND (secretariat_status IS NULL OR secretariat_status = 'A_FORMATER' OR secretariat_status = 'RETOUR_CORRECTION')
+       RETURNING *`,
+      [req.params.id, req.user.id]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found or not in correct state" });
+    return res.json({ document: { id: doc.id, number: doc.number, status: doc.secretariat_status } });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to format document" });
+  }
+});
+
+app.patch("/secretariat/documents/:id/send-to-assistant", authRequired, requireRole(["ADMIN", "SECRETARIAT"]), async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE reception_documents
+       SET secretariat_status = 'ENVOYE_ASSISTANTE',
+           secretariat_sent_at = NOW()
+       WHERE id = $1
+         AND secretariat_status = 'FORMATE'
+       RETURNING *`,
+      [req.params.id]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found or not formatted" });
+    return res.json({ document: { id: doc.id, number: doc.number, status: doc.secretariat_status } });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to send document to assistant" });
+  }
+});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
