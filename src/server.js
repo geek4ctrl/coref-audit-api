@@ -2417,8 +2417,18 @@ app.get("/secretariat/dashboard", authRequired, requireRole(["ADMIN", "SECRETARI
               secretariat_status, created_at
        FROM reception_documents
        WHERE chief_decision = 'SEND_SECRETARIAT'
-         AND (secretariat_status IS NULL OR secretariat_status = 'A_FORMATER')
+         AND (secretariat_status IS NULL OR secretariat_status = 'A_FORMATER' OR secretariat_status = 'RETOUR_CORRECTION')
        ORDER BY created_at DESC
+       LIMIT 20`
+    );
+
+    const formattedDocsResult = await query(
+      `SELECT id, number, subject, sender, document_type, received_date, status,
+              secretariat_status, secretariat_formatted_at, created_at
+       FROM reception_documents
+       WHERE chief_decision = 'SEND_SECRETARIAT'
+         AND secretariat_status = 'FORMATE'
+       ORDER BY secretariat_formatted_at DESC
        LIMIT 20`
     );
 
@@ -2429,10 +2439,23 @@ app.get("/secretariat/dashboard", authRequired, requireRole(["ADMIN", "SECRETARI
       sender: row.sender,
       owner: row.sender,
       type: row.document_type,
-      status: row.secretariat_status || "À formater",
-      statusTone: "warning",
+      status: row.secretariat_status === 'RETOUR_CORRECTION' ? 'Retour correction' : 'À formater',
+      statusTone: row.secretariat_status === 'RETOUR_CORRECTION' ? 'danger' : 'warning',
       receivedDate: row.received_date,
       lastActionAt: row.created_at
+    }));
+
+    const formattedDocuments = formattedDocsResult.rows.map(row => ({
+      id: row.id,
+      number: row.number,
+      object: row.subject,
+      sender: row.sender,
+      owner: row.sender,
+      type: row.document_type,
+      status: 'Formaté',
+      statusTone: 'success',
+      receivedDate: row.received_date,
+      lastActionAt: row.secretariat_formatted_at || row.created_at
     }));
 
     return res.json({
@@ -2442,7 +2465,8 @@ app.get("/secretariat/dashboard", authRequired, requireRole(["ADMIN", "SECRETARI
         sentToAssistant: parseInt(sentToAssistantResult.rows[0].count),
         returnedForCorrection: parseInt(returnedResult.rows[0].count)
       },
-      documents
+      documents,
+      formattedDocuments
     });
   } catch (error) {
     return res.status(500).json({ error: "Failed to load secretariat dashboard", detail: error.message });
@@ -2472,14 +2496,17 @@ app.patch("/secretariat/documents/:id/format", authRequired, requireRole(["ADMIN
 
 app.patch("/secretariat/documents/:id/send-to-assistant", authRequired, requireRole(["ADMIN", "SECRETARIAT"]), async (req, res) => {
   try {
+    const { note } = req.body || {};
     const result = await query(
       `UPDATE reception_documents
        SET secretariat_status = 'ENVOYE_ASSISTANTE',
-           secretariat_sent_at = NOW()
+           secretariat_sent_at = NOW(),
+           assistant_status = U&'\\00C0 traiter',
+           observations = CASE WHEN $2 IS NOT NULL THEN COALESCE(observations || E'\n', '') || '[Secrétariat] ' || $2 ELSE observations END
        WHERE id = $1
          AND secretariat_status = 'FORMATE'
        RETURNING *`,
-      [req.params.id]
+      [req.params.id, typeof note === "string" && note.trim() ? note.trim() : null]
     );
     const doc = result.rows[0];
     if (!doc) return res.status(404).json({ error: "Document not found or not formatted" });
