@@ -1853,7 +1853,7 @@ app.patch("/chief/documents/:id/decision", authRequired, requireRole(["ADMIN", "
   }
 });
 
-// ── PILIER ENDPOINTS ──
+// ── SERVICE INTERNE ENDPOINTS ──
 
 const sanitizePilierDocument = (doc) => {
   const statusMap = {
@@ -1894,6 +1894,143 @@ const sanitizePilierDocument = (doc) => {
     createdAt: doc.created_at
   };
 };
+
+app.get("/service/dashboard", authRequired, requireRole(["ADMIN", "SERVICE_INTERNE"]), async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    let whereClause;
+    let params;
+
+    if (userRole === "ADMIN") {
+      whereClause = "WHERE chief_decision = 'ASSIGN_SERVICE'";
+      params = [];
+    } else {
+      whereClause = "WHERE chief_decision = 'ASSIGN_SERVICE' AND chief_assigned_to_value = $1::TEXT";
+      params = [userId];
+    }
+
+    const [statsResult, documentsResult] = await Promise.all([
+      query(
+        `SELECT
+          COUNT(*) FILTER (WHERE pilier_status IS NULL OR pilier_status = 'ENVOYE')::INT AS to_receive,
+          COUNT(*) FILTER (WHERE pilier_status IN ('RECU', 'EN_TRAITEMENT'))::INT AS in_progress,
+          COUNT(*) FILTER (WHERE pilier_status = 'ENVOYE_COORDINATEUR')::INT AS at_coordinator,
+          COUNT(*) FILTER (WHERE coordinator_status = 'VALIDE')::INT AS done,
+          COUNT(*) FILTER (
+            WHERE (pilier_status NOT IN ('FINALISE') OR pilier_status IS NULL)
+            AND chief_sla_days IS NOT NULL
+            AND chief_decided_at IS NOT NULL
+            AND chief_decided_at + (chief_sla_days || ' days')::INTERVAL < NOW()
+          )::INT AS late
+        FROM reception_documents
+        ${whereClause}`,
+        params
+      ),
+      query(
+        `SELECT * FROM reception_documents
+        ${whereClause}
+        ORDER BY
+          CASE WHEN pilier_status IS NULL OR pilier_status = 'ENVOYE' THEN 0
+               WHEN pilier_status IN ('RECU', 'EN_TRAITEMENT') THEN 1
+               WHEN pilier_status = 'ENVOYE_COORDINATEUR' THEN 2
+               ELSE 3 END,
+          created_at DESC
+        LIMIT 50`,
+        params
+      )
+    ]);
+
+    const stats = statsResult.rows[0] || {};
+    const categoryMap = {
+      "a-receptionner": (d) => !d.pilier_status || d.pilier_status === "ENVOYE",
+      "en-traitement": (d) => d.pilier_status === "RECU" || d.pilier_status === "EN_TRAITEMENT",
+      "chez-coordinateur": (d) => d.pilier_status === "ENVOYE_COORDINATEUR" || d.pilier_status === "FINALISE",
+      "termines": (d) => d.coordinator_status === "VALIDE"
+    };
+
+    const documents = documentsResult.rows.map((doc) => {
+      const sanitized = sanitizePilierDocument(doc);
+      let category = "a-receptionner";
+      for (const [key, fn] of Object.entries(categoryMap)) {
+        if (fn(doc)) { category = key; break; }
+      }
+      return { ...sanitized, category };
+    });
+
+    return res.json({
+      cards: {
+        toReceive: stats.to_receive || 0,
+        inProgress: stats.in_progress || 0,
+        atCoordinator: stats.at_coordinator || 0,
+        late: stats.late || 0
+      },
+      serviceName: req.user.name || "",
+      documents
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch service dashboard" });
+  }
+});
+
+app.patch("/service/documents/:id/acknowledge", authRequired, requireRole(["ADMIN", "SERVICE_INTERNE"]), async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE reception_documents SET pilier_status = 'RECU', pilier_acknowledged_at = NOW(), pilier_user_id = $1 WHERE id = $2 AND chief_decision = 'ASSIGN_SERVICE' RETURNING *`,
+      [req.user.id, req.params.id]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    return res.json({ document: sanitizePilierDocument(doc) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to acknowledge document" });
+  }
+});
+
+app.patch("/service/documents/:id/start-processing", authRequired, requireRole(["ADMIN", "SERVICE_INTERNE"]), async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE reception_documents SET pilier_status = 'EN_TRAITEMENT', pilier_started_at = NOW() WHERE id = $1 AND chief_decision = 'ASSIGN_SERVICE' RETURNING *`,
+      [req.params.id]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    return res.json({ document: sanitizePilierDocument(doc) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to start processing" });
+  }
+});
+
+app.patch("/service/documents/:id/finalize", authRequired, requireRole(["ADMIN", "SERVICE_INTERNE"]), async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE reception_documents SET pilier_status = 'FINALISE', pilier_finalized_at = NOW() WHERE id = $1 AND chief_decision = 'ASSIGN_SERVICE' RETURNING *`,
+      [req.params.id]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    return res.json({ document: sanitizePilierDocument(doc) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to finalize document" });
+  }
+});
+
+app.patch("/service/documents/:id/send-to-coordinator", authRequired, requireRole(["ADMIN", "SERVICE_INTERNE"]), async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE reception_documents SET pilier_status = 'ENVOYE_COORDINATEUR', pilier_sent_to_coordinator_at = NOW() WHERE id = $1 AND chief_decision = 'ASSIGN_SERVICE' RETURNING *`,
+      [req.params.id]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    return res.json({ document: sanitizePilierDocument(doc) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to send to coordinator" });
+  }
+});
+
+// ── PILIER ENDPOINTS ──
 
 app.get("/pilier/dashboard", authRequired, requireRole(["ADMIN", "PILIER", "PILIER_COORD"]), async (req, res) => {
   try {
