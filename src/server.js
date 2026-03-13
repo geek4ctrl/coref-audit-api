@@ -1915,9 +1915,10 @@ app.get("/pilier/dashboard", authRequired, requireRole(["ADMIN", "PILIER", "PILI
       query(
         `SELECT
           COUNT(*) FILTER (WHERE pilier_status IS NULL OR pilier_status = 'ENVOYE')::INT AS to_receive,
-          COUNT(*) FILTER (WHERE pilier_status IN ('RECU', 'EN_TRAITEMENT'))::INT AS in_progress,
+          COUNT(*) FILTER (WHERE pilier_status IN ('RECU', 'EN_TRAITEMENT') AND (coordinator_status IS NULL OR coordinator_status != 'REJETE'))::INT AS in_progress,
           COUNT(*) FILTER (WHERE pilier_status = 'ENVOYE_COORDINATEUR')::INT AS at_coordinator,
           COUNT(*) FILTER (WHERE pilier_status IN ('FINALISE', 'ENVOYE_COORDINATEUR') AND coordinator_status = 'VALIDE')::INT AS done,
+          COUNT(*) FILTER (WHERE coordinator_status = 'REJETE' AND pilier_status = 'EN_TRAITEMENT')::INT AS rejected,
           COUNT(*) FILTER (
             WHERE pilier_status NOT IN ('FINALISE') OR pilier_status IS NULL
             AND chief_sla_days IS NOT NULL
@@ -1945,7 +1946,8 @@ app.get("/pilier/dashboard", authRequired, requireRole(["ADMIN", "PILIER", "PILI
     const stats = statsResult.rows[0] || {};
     const categoryMap = {
       "a-receptionner": (d) => !d.pilier_status || d.pilier_status === "ENVOYE",
-      "en-traitement": (d) => d.pilier_status === "RECU" || d.pilier_status === "EN_TRAITEMENT",
+      "en-traitement": (d) => (d.pilier_status === "RECU" || d.pilier_status === "EN_TRAITEMENT") && d.coordinator_status !== "REJETE",
+      "retour-correction": (d) => d.coordinator_status === "REJETE" && d.pilier_status === "EN_TRAITEMENT",
       "chez-coordinateur": (d) => d.pilier_status === "ENVOYE_COORDINATEUR" || d.pilier_status === "FINALISE",
       "termines": (d) => d.coordinator_status === "VALIDE"
     };
@@ -1964,6 +1966,7 @@ app.get("/pilier/dashboard", authRequired, requireRole(["ADMIN", "PILIER", "PILI
         toReceive: stats.to_receive || 0,
         inProgress: stats.in_progress || 0,
         atCoordinator: stats.at_coordinator || 0,
+        rejected: stats.rejected || 0,
         late: stats.late || 0
       },
       serviceName: req.user.service_name || "",
