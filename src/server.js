@@ -1131,7 +1131,8 @@ app.post("/reception/documents", authRequired, requireRole(["ADMIN", "RECEPTION"
       subject,
       category,
       confidentiality,
-      observations
+      observations,
+      priority
     } = req.body || {};
 
     if (!documentType || !receivedDate || !sender || !subject || !category || !confidentiality) {
@@ -1139,6 +1140,11 @@ app.post("/reception/documents", authRequired, requireRole(["ADMIN", "RECEPTION"
         error: "documentType, receivedDate, sender, subject, category, and confidentiality are required"
       });
     }
+
+    const allowedPriorities = ["Basse", "Normale", "Haute", "Urgente"];
+    const normalizedPriority = typeof priority === "string" && allowedPriorities.includes(priority.trim())
+      ? priority.trim()
+      : "Normale";
 
     const year = new Date(receivedDate).getFullYear();
     if (!Number.isInteger(year) || year < 2000) {
@@ -1168,9 +1174,10 @@ app.post("/reception/documents", authRequired, requireRole(["ADMIN", "RECEPTION"
         category,
         confidentiality,
         observations,
+        assistant_priority,
         created_by_user_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *
       `,
       [
@@ -1182,6 +1189,7 @@ app.post("/reception/documents", authRequired, requireRole(["ADMIN", "RECEPTION"
         category,
         confidentiality,
         observations || null,
+        normalizedPriority,
         req.user.userId
       ]
     );
@@ -1505,7 +1513,11 @@ app.get("/assistant/dashboard", authRequired, requireRole(["ADMIN", "ASSISTANT_C
           COUNT(*) FILTER (
             WHERE (assistant_status = 'En cours' AND received_date < CURRENT_DATE - INTERVAL '7 days')
                OR (chief_decision = 'BLOQUER' AND assistant_status <> 'Terminé')
-          )::INT AS blocked_count
+          )::INT AS blocked_count,
+          COUNT(*) FILTER (
+            WHERE assistant_priority IN ('Haute', 'Urgente')
+              AND assistant_status <> 'Terminé'
+          )::INT AS urgent_count
         FROM reception_documents
         `
       ),
@@ -1527,7 +1539,15 @@ app.get("/assistant/dashboard", authRequired, requireRole(["ADMIN", "ASSISTANT_C
             ELSE '—'
           END AS delay_label
         FROM reception_documents
-        ORDER BY created_at DESC
+        ORDER BY
+          CASE assistant_priority
+            WHEN 'Urgente' THEN 0
+            WHEN 'Haute' THEN 1
+            WHEN 'Normale' THEN 2
+            WHEN 'Basse' THEN 3
+            ELSE 2
+          END,
+          created_at DESC
         LIMIT $1
         `,
         [limit]
@@ -1541,7 +1561,8 @@ app.get("/assistant/dashboard", authRequired, requireRole(["ADMIN", "ASSISTANT_C
         toReceive: stats.total_count || 0,
         toProcess: stats.to_process_count || 0,
         inProgress: stats.in_progress_count || 0,
-        done: stats.done_count || 0
+        done: stats.done_count || 0,
+        urgent: stats.urgent_count || 0
       },
       quickFilters: {
         all: stats.total_count || 0,
@@ -1551,7 +1572,8 @@ app.get("/assistant/dashboard", authRequired, requireRole(["ADMIN", "ASSISTANT_C
         noAck: stats.sent_to_chief_count || 0,
         delayed: stats.delayed_count || 0,
         blocked: stats.blocked_count || 0,
-        treatedThisWeek: stats.treated_this_week_count || 0
+        treatedThisWeek: stats.treated_this_week_count || 0,
+        urgent: stats.urgent_count || 0
       },
       documents: documentsResult.rows.map(sanitizeAssistantDocument)
     });
@@ -1875,6 +1897,8 @@ const sanitizePilierDocument = (doc) => {
     sender: doc.sender,
     category: doc.category,
     chiefPriority: doc.chief_priority,
+    assistantPriority: doc.assistant_priority,
+    priority: doc.chief_priority || doc.assistant_priority || 'Normale',
     chiefInstruction: doc.chief_instruction,
     chiefSlaDays: doc.chief_sla_days,
     chiefDecidedAt: doc.chief_decided_at,
@@ -1925,6 +1949,13 @@ app.get("/service/dashboard", authRequired, requireRole(["ADMIN", "SERVICE_INTER
                WHEN pilier_status IN ('RECU', 'EN_TRAITEMENT') THEN 1
                WHEN pilier_status = 'ENVOYE_COORDINATEUR' THEN 2
                ELSE 3 END,
+          CASE chief_priority
+            WHEN 'Urgente' THEN 0
+            WHEN 'Haute' THEN 1
+            WHEN 'Normale' THEN 2
+            WHEN 'Basse' THEN 3
+            ELSE 2
+          END,
           created_at DESC
         LIMIT 50`,
         params
@@ -2008,7 +2039,7 @@ app.patch("/service/documents/:id/finalize", authRequired, requireRole(["ADMIN",
 app.patch("/service/documents/:id/send-to-coordinator", authRequired, requireRole(["ADMIN", "SERVICE_INTERNE"]), async (req, res) => {
   try {
     const result = await query(
-      `UPDATE reception_documents SET pilier_status = 'ENVOYE_COORDINATEUR', pilier_sent_to_coordinator_at = NOW() WHERE id = $1 AND chief_decision = 'ASSIGN_SERVICE' RETURNING *`,
+      `UPDATE reception_documents SET pilier_status = 'ENVOYE_COORDINATEUR', pilier_sent_to_coordinator_at = NOW(), coordinator_status = 'EN_ATTENTE_VALIDATION' WHERE id = $1 AND chief_decision = 'ASSIGN_SERVICE' RETURNING *`,
       [req.params.id]
     );
     const doc = result.rows[0];
@@ -2082,6 +2113,13 @@ app.get("/pilier/dashboard", authRequired, requireRole(["ADMIN", "PILIER", "PILI
                WHEN pilier_status IN ('RECU', 'EN_TRAITEMENT') THEN 1
                WHEN pilier_status = 'ENVOYE_COORDINATEUR' THEN 2
                ELSE 3 END,
+          CASE chief_priority
+            WHEN 'Urgente' THEN 0
+            WHEN 'Haute' THEN 1
+            WHEN 'Normale' THEN 2
+            WHEN 'Basse' THEN 3
+            ELSE 2
+          END,
           created_at DESC
         LIMIT 50`,
         params
@@ -2211,12 +2249,95 @@ app.patch("/pilier/documents/:id/send-to-coordinator", authRequired, requireRole
 
 // ── COORDINATOR ENDPOINTS ──
 
+app.get("/coordinator/dashboard", authRequired, requireRole(["ADMIN", "PILIER_COORD"]), async (req, res) => {
+  try {
+    const [statsResult, documentsResult, historyResult] = await Promise.all([
+      query(
+        `SELECT
+          COUNT(*) FILTER (WHERE coordinator_status = 'EN_ATTENTE_VALIDATION')::INT AS pending,
+          COUNT(*) FILTER (WHERE coordinator_status = 'VALIDE')::INT AS validated,
+          COUNT(*) FILTER (WHERE coordinator_status = 'REJETE')::INT AS rejected,
+          COUNT(*) FILTER (
+            WHERE coordinator_status = 'EN_ATTENTE_VALIDATION'
+              AND chief_priority IN ('Haute', 'Urgente')
+          )::INT AS urgent,
+          COUNT(*) FILTER (
+            WHERE coordinator_status = 'EN_ATTENTE_VALIDATION'
+              AND chief_sla_days IS NOT NULL AND chief_decided_at IS NOT NULL
+              AND chief_decided_at + (chief_sla_days || ' days')::INTERVAL < NOW()
+          )::INT AS late
+        FROM reception_documents
+        WHERE coordinator_status IS NOT NULL`
+      ),
+      query(
+        `SELECT * FROM reception_documents
+         WHERE coordinator_status IN ('EN_ATTENTE_VALIDATION', 'VALIDE', 'REJETE')
+         ORDER BY
+           CASE coordinator_status
+             WHEN 'EN_ATTENTE_VALIDATION' THEN 0
+             WHEN 'REJETE' THEN 1
+             ELSE 2
+           END,
+           CASE chief_priority
+             WHEN 'Urgente' THEN 0 WHEN 'Haute' THEN 1 WHEN 'Normale' THEN 2 ELSE 3
+           END,
+           pilier_sent_to_coordinator_at DESC NULLS LAST
+         LIMIT 50`
+      ),
+      query(
+        `SELECT * FROM reception_documents
+         WHERE coordinator_status = 'VALIDE'
+           AND coordinator_validated_at >= NOW() - INTERVAL '7 days'
+         ORDER BY coordinator_validated_at DESC
+         LIMIT 10`
+      )
+    ]);
+
+    const stats = statsResult.rows[0] || {};
+
+    const categoryMap = {
+      "a-valider": (d) => d.coordinator_status === "EN_ATTENTE_VALIDATION",
+      "rejetes": (d) => d.coordinator_status === "REJETE",
+      "valides": (d) => d.coordinator_status === "VALIDE"
+    };
+
+    const documents = documentsResult.rows.map((doc) => {
+      const sanitized = sanitizePilierDocument(doc);
+      let category = "a-valider";
+      for (const [key, fn] of Object.entries(categoryMap)) {
+        if (fn(doc)) { category = key; break; }
+      }
+      return { ...sanitized, category };
+    });
+
+    const recentValidated = historyResult.rows.map(sanitizePilierDocument);
+
+    return res.json({
+      cards: {
+        pending: stats.pending || 0,
+        validated: stats.validated || 0,
+        rejected: stats.rejected || 0,
+        urgent: stats.urgent || 0,
+        late: stats.late || 0
+      },
+      documents,
+      recentValidated
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch coordinator dashboard" });
+  }
+});
+
 app.get("/coordinator/documents", authRequired, requireRole(["ADMIN", "PILIER_COORD"]), async (req, res) => {
   try {
     const result = await query(
       `SELECT * FROM reception_documents
        WHERE coordinator_status = 'EN_ATTENTE_VALIDATION'
-       ORDER BY pilier_sent_to_coordinator_at DESC
+       ORDER BY
+         CASE chief_priority
+           WHEN 'Urgente' THEN 0 WHEN 'Haute' THEN 1 WHEN 'Normale' THEN 2 ELSE 3
+         END,
+         pilier_sent_to_coordinator_at DESC
        LIMIT 50`
     );
     return res.json({ documents: result.rows.map(sanitizePilierDocument) });
@@ -2414,21 +2535,37 @@ app.get("/secretariat/dashboard", authRequired, requireRole(["ADMIN", "SECRETARI
 
     const documentsResult = await query(
       `SELECT id, number, subject, sender, document_type, received_date, status,
-              secretariat_status, created_at
+              secretariat_status, assistant_priority, chief_priority, created_at
        FROM reception_documents
        WHERE chief_decision = 'SEND_SECRETARIAT'
          AND (secretariat_status IS NULL OR secretariat_status = 'A_FORMATER' OR secretariat_status = 'RETOUR_CORRECTION')
-       ORDER BY created_at DESC
+       ORDER BY
+         CASE COALESCE(chief_priority, assistant_priority)
+           WHEN 'Urgente' THEN 0
+           WHEN 'Haute' THEN 1
+           WHEN 'Normale' THEN 2
+           WHEN 'Basse' THEN 3
+           ELSE 2
+         END,
+         created_at DESC
        LIMIT 20`
     );
 
     const formattedDocsResult = await query(
       `SELECT id, number, subject, sender, document_type, received_date, status,
-              secretariat_status, secretariat_formatted_at, created_at
+              secretariat_status, secretariat_formatted_at, assistant_priority, chief_priority, created_at
        FROM reception_documents
        WHERE chief_decision = 'SEND_SECRETARIAT'
          AND secretariat_status = 'FORMATE'
-       ORDER BY secretariat_formatted_at DESC
+       ORDER BY
+         CASE COALESCE(chief_priority, assistant_priority)
+           WHEN 'Urgente' THEN 0
+           WHEN 'Haute' THEN 1
+           WHEN 'Normale' THEN 2
+           WHEN 'Basse' THEN 3
+           ELSE 2
+         END,
+         secretariat_formatted_at DESC
        LIMIT 20`
     );
 
@@ -2441,6 +2578,7 @@ app.get("/secretariat/dashboard", authRequired, requireRole(["ADMIN", "SECRETARI
       type: row.document_type,
       status: row.secretariat_status === 'RETOUR_CORRECTION' ? 'Retour correction' : 'À formater',
       statusTone: row.secretariat_status === 'RETOUR_CORRECTION' ? 'danger' : 'warning',
+      priority: row.chief_priority || row.assistant_priority || 'Normale',
       receivedDate: row.received_date,
       lastActionAt: row.created_at
     }));
@@ -2454,6 +2592,7 @@ app.get("/secretariat/dashboard", authRequired, requireRole(["ADMIN", "SECRETARI
       type: row.document_type,
       status: 'Formaté',
       statusTone: 'success',
+      priority: row.chief_priority || row.assistant_priority || 'Normale',
       receivedDate: row.received_date,
       lastActionAt: row.secretariat_formatted_at || row.created_at
     }));
