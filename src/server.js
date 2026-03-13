@@ -588,7 +588,7 @@ app.delete("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) 
  *         description: User not found
  */
 
-app.get("/messagerie/users", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+app.get("/messagerie/users", authRequired, requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG"]), async (req, res) => {
   try {
     const result = await query(
       `
@@ -619,7 +619,7 @@ app.get("/messagerie/users", authRequired, requireRole(["ADMIN", "RECEPTION"]), 
  *         description: Users list
  */
 
-app.get("/messagerie/inbox", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+app.get("/messagerie/inbox", authRequired, requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG"]), async (req, res) => {
   try {
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 100);
     const [result, unreadResult] = await Promise.all([
@@ -680,7 +680,7 @@ app.get("/messagerie/inbox", authRequired, requireRole(["ADMIN", "RECEPTION"]), 
  *         description: Inbox messages
  */
 
-app.post("/messagerie/messages/:id/mark-read", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+app.post("/messagerie/messages/:id/mark-read", authRequired, requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG"]), async (req, res) => {
   try {
     const result = await query(
       `
@@ -722,7 +722,7 @@ app.post("/messagerie/messages/:id/mark-read", authRequired, requireRole(["ADMIN
  *         description: Updated message
  */
 
-app.get("/messagerie/sent", authRequired, requireRole(["ADMIN", "RECEPTION"]), async (req, res) => {
+app.get("/messagerie/sent", authRequired, requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG"]), async (req, res) => {
   try {
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 100);
     const result = await query(
@@ -774,7 +774,7 @@ app.get("/messagerie/sent", authRequired, requireRole(["ADMIN", "RECEPTION"]), a
 app.post(
   "/messagerie/messages",
   authRequired,
-  requireRole(["ADMIN", "RECEPTION"]),
+  requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG"]),
   messageUpload.single("attachment"),
   async (req, res) => {
   try {
@@ -843,7 +843,7 @@ app.post(
 app.get(
   "/messagerie/messages/:messageId/attachments/:attachmentId/download",
   authRequired,
-  requireRole(["ADMIN", "RECEPTION"]),
+  requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG"]),
   async (req, res) => {
     try {
       const result = await query(
@@ -2652,6 +2652,204 @@ app.patch("/secretariat/documents/:id/send-to-assistant", authRequired, requireR
     return res.json({ document: { id: doc.id, number: doc.number, status: doc.secretariat_status } });
   } catch (error) {
     return res.status(500).json({ error: "Failed to send document to assistant" });
+  }
+});
+
+// ── RETARDS (Late documents) ─────────────────────────────────────────
+app.get("/retards", authRequired, requireRole(["ADMIN", "CHEF_SG", "ASSISTANT_CHEF", "AUDITEUR"]), async (req, res) => {
+  try {
+    const lateResult = await query(`
+      SELECT
+        d.id, d.number, d.subject, d.sender,
+        d.chief_assigned_to_value,
+        d.chief_decided_at,
+        d.chief_sla_days,
+        COALESCE(d.chief_priority, d.assistant_priority, 'Normale') AS priority,
+        d.assistant_status,
+        d.pilier_status,
+        d.coordinator_status,
+        d.chief_decided_at + (d.chief_sla_days || ' days')::INTERVAL AS deadline,
+        EXTRACT(DAY FROM NOW() - (d.chief_decided_at + (d.chief_sla_days || ' days')::INTERVAL))::INT AS delay_days
+      FROM reception_documents d
+      WHERE d.chief_decided_at IS NOT NULL
+        AND d.chief_sla_days IS NOT NULL
+        AND d.chief_decided_at + (d.chief_sla_days || ' days')::INTERVAL < NOW()
+        AND d.assistant_status NOT IN ('Traité', 'Clôturé')
+      ORDER BY delay_days DESC
+    `);
+
+    const documents = lateResult.rows.map(doc => ({
+      id: doc.id,
+      number: doc.number,
+      subject: doc.subject,
+      owner: doc.chief_assigned_to_value || doc.sender || '—',
+      dueDate: doc.deadline ? new Date(doc.deadline).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' }) : '—',
+      delayDays: doc.delay_days || 0,
+      priority: doc.priority,
+      status: doc.coordinator_status === 'VALIDE' ? 'Validé'
+        : doc.pilier_status === 'EN_TRAITEMENT' ? 'En traitement'
+        : doc.assistant_status || 'En retard'
+    }));
+
+    const totalLate = documents.length;
+    const avgDelay = totalLate > 0 ? Math.round(documents.reduce((s, d) => s + d.delayDays, 0) / totalLate) : 0;
+
+    // Top holders
+    const holderMap = {};
+    for (const doc of documents) {
+      if (!holderMap[doc.owner]) holderMap[doc.owner] = { count: 0, totalDelay: 0 };
+      holderMap[doc.owner].count++;
+      holderMap[doc.owner].totalDelay += doc.delayDays;
+    }
+    const topHolders = Object.entries(holderMap)
+      .map(([name, data]) => ({ name, count: data.count, averageDelay: Math.round(data.totalDelay / data.count) }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+
+    const maxHolder = topHolders[0] || null;
+
+    return res.json({
+      cards: {
+        totalLate,
+        avgDelay,
+        maxHolderName: maxHolder ? maxHolder.name : '—',
+        maxHolderCount: maxHolder ? maxHolder.count : 0
+      },
+      topHolders,
+      documents
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch late documents" });
+  }
+});
+
+// ── RELANCES (Follow-ups) ────────────────────────────────────────────
+app.get("/relances", authRequired, requireRole(["ADMIN", "CHEF_SG", "ASSISTANT_CHEF"]), async (req, res) => {
+  try {
+    // Documents approaching deadline (within 2 days) or past deadline
+    const result = await query(`
+      SELECT
+        d.id, d.number, d.subject, d.sender,
+        d.chief_assigned_to_value,
+        d.chief_decided_at,
+        d.chief_sla_days,
+        COALESCE(d.chief_priority, d.assistant_priority, 'Normale') AS priority,
+        d.assistant_status,
+        d.chief_decided_at + (d.chief_sla_days || ' days')::INTERVAL AS deadline,
+        EXTRACT(DAY FROM (d.chief_decided_at + (d.chief_sla_days || ' days')::INTERVAL) - NOW())::INT AS days_remaining
+      FROM reception_documents d
+      WHERE d.chief_decided_at IS NOT NULL
+        AND d.chief_sla_days IS NOT NULL
+        AND d.assistant_status NOT IN ('Traité', 'Clôturé')
+      ORDER BY
+        CASE WHEN d.chief_decided_at + (d.chief_sla_days || ' days')::INTERVAL < NOW() THEN 0 ELSE 1 END,
+        (d.chief_decided_at + (d.chief_sla_days || ' days')::INTERVAL) ASC
+    `);
+
+    const documents = result.rows.map(doc => {
+      const daysRemaining = doc.days_remaining || 0;
+      let urgency = 'normal';
+      if (daysRemaining < 0) urgency = 'overdue';
+      else if (daysRemaining <= 2) urgency = 'critical';
+      else if (daysRemaining <= 5) urgency = 'warning';
+
+      return {
+        id: doc.id,
+        number: doc.number,
+        subject: doc.subject,
+        owner: doc.chief_assigned_to_value || doc.sender || '—',
+        deadline: doc.deadline ? new Date(doc.deadline).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' }) : '—',
+        daysRemaining,
+        priority: doc.priority,
+        status: doc.assistant_status || '—',
+        urgency
+      };
+    });
+
+    const overdue = documents.filter(d => d.urgency === 'overdue').length;
+    const critical = documents.filter(d => d.urgency === 'critical').length;
+    const warning = documents.filter(d => d.urgency === 'warning').length;
+
+    return res.json({
+      cards: { total: documents.length, overdue, critical, warning },
+      documents
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch follow-ups" });
+  }
+});
+
+// ── AUDITEUR Dashboard ──────────────────────────────────────────────
+app.get("/auditeur/dashboard", authRequired, requireRole(["ADMIN", "AUDITEUR"]), async (req, res) => {
+  try {
+    const statsResult = await query(`
+      SELECT
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE assistant_status NOT IN ('Traité', 'Clôturé') AND chief_decided_at IS NOT NULL AND chief_sla_days IS NOT NULL AND chief_decided_at + (chief_sla_days || ' days')::INTERVAL < NOW()) AS late,
+        COUNT(*) FILTER (WHERE chief_decided_at IS NOT NULL AND chief_sla_days IS NOT NULL AND chief_decided_at + (chief_sla_days || ' days')::INTERVAL >= NOW() AND assistant_status NOT IN ('Traité', 'Clôturé')) AS on_time,
+        COUNT(*) FILTER (WHERE assistant_status IN ('Traité', 'Clôturé')) AS completed,
+        COUNT(*) FILTER (WHERE COALESCE(chief_priority, assistant_priority) = 'Urgente') AS urgent,
+        COUNT(*) FILTER (WHERE chief_decided_at IS NOT NULL) AS with_decision
+      FROM reception_documents
+    `);
+
+    const stats = statsResult.rows[0];
+
+    const recentResult = await query(`
+      SELECT
+        d.id, d.number, d.subject, d.sender,
+        d.chief_assigned_to_value,
+        d.assistant_status,
+        d.chief_decision,
+        COALESCE(d.chief_priority, d.assistant_priority, 'Normale') AS priority,
+        d.chief_decided_at,
+        d.chief_sla_days,
+        d.pilier_status,
+        d.coordinator_status,
+        d.created_at,
+        CASE
+          WHEN d.chief_decided_at IS NOT NULL AND d.chief_sla_days IS NOT NULL
+          THEN d.chief_decided_at + (d.chief_sla_days || ' days')::INTERVAL
+          ELSE NULL
+        END AS deadline
+      FROM reception_documents d
+      ORDER BY d.created_at DESC
+      LIMIT 50
+    `);
+
+    const documents = recentResult.rows.map(doc => {
+      const deadline = doc.deadline ? new Date(doc.deadline) : null;
+      const isLate = deadline && deadline < new Date() && !['Traité', 'Clôturé'].includes(doc.assistant_status);
+      return {
+        id: doc.id,
+        number: doc.number,
+        subject: doc.subject,
+        sender: doc.sender,
+        owner: doc.chief_assigned_to_value || '—',
+        status: doc.assistant_status,
+        chiefDecision: doc.chief_decision || '—',
+        priority: doc.priority,
+        pilierStatus: doc.pilier_status || '—',
+        coordinatorStatus: doc.coordinator_status || '—',
+        deadline: deadline ? deadline.toISOString() : null,
+        isLate: !!isLate,
+        createdAt: doc.created_at
+      };
+    });
+
+    return res.json({
+      cards: {
+        total: parseInt(stats.total),
+        late: parseInt(stats.late),
+        onTime: parseInt(stats.on_time),
+        completed: parseInt(stats.completed),
+        urgent: parseInt(stats.urgent),
+        withDecision: parseInt(stats.with_decision)
+      },
+      documents
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch auditeur dashboard" });
   }
 });
 
