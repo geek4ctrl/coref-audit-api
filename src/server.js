@@ -1897,19 +1897,8 @@ const sanitizePilierDocument = (doc) => {
 
 app.get("/service/dashboard", authRequired, requireRole(["ADMIN", "SERVICE_INTERNE"]), async (req, res) => {
   try {
-    const userId = req.user.id;
-    const userRole = req.user.role;
-
-    let whereClause;
-    let params;
-
-    if (userRole === "ADMIN") {
-      whereClause = "WHERE chief_decision = 'ASSIGN_SERVICE'";
-      params = [];
-    } else {
-      whereClause = "WHERE chief_decision = 'ASSIGN_SERVICE' AND chief_assigned_to_value = $1::TEXT";
-      params = [userId];
-    }
+    const whereClause = "WHERE chief_decision = 'ASSIGN_SERVICE'";
+    const params = [];
 
     const [statsResult, documentsResult] = await Promise.all([
       query(
@@ -1945,9 +1934,9 @@ app.get("/service/dashboard", authRequired, requireRole(["ADMIN", "SERVICE_INTER
     const stats = statsResult.rows[0] || {};
     const categoryMap = {
       "a-receptionner": (d) => !d.pilier_status || d.pilier_status === "ENVOYE",
-      "en-traitement": (d) => d.pilier_status === "RECU" || d.pilier_status === "EN_TRAITEMENT",
-      "chez-coordinateur": (d) => d.pilier_status === "ENVOYE_COORDINATEUR" || d.pilier_status === "FINALISE",
-      "termines": (d) => d.coordinator_status === "VALIDE"
+      "en-traitement": (d) => d.pilier_status === "RECU" || d.pilier_status === "EN_TRAITEMENT" || d.pilier_status === "FINALISE",
+      "chez-coordinateur": (d) => d.pilier_status === "ENVOYE_COORDINATEUR",
+      "termines": (d) => d.coordinator_status === "VALIDE" || (d.pilier_status === "FINALISE" && d.assistant_status === "\u00C0 traiter")
     };
 
     const documents = documentsResult.rows.map((doc) => {
@@ -2027,6 +2016,25 @@ app.patch("/service/documents/:id/send-to-coordinator", authRequired, requireRol
     return res.json({ document: sanitizePilierDocument(doc) });
   } catch (error) {
     return res.status(500).json({ error: "Failed to send to coordinator" });
+  }
+});
+
+app.patch("/service/documents/:id/send-to-assistant", authRequired, requireRole(["ADMIN", "SERVICE_INTERNE"]), async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE reception_documents
+       SET pilier_status = 'FINALISE',
+           pilier_finalized_at = COALESCE(pilier_finalized_at, NOW()),
+           assistant_status = U&'\\00C0 traiter'
+       WHERE id = $1 AND chief_decision = 'ASSIGN_SERVICE'
+       RETURNING *`,
+      [req.params.id]
+    );
+    const doc = result.rows[0];
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    return res.json({ document: sanitizePilierDocument(doc) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to send to assistant" });
   }
 });
 
