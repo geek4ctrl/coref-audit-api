@@ -211,3 +211,19 @@ CREATE INDEX IF NOT EXISTS reception_documents_coordinator_status_idx
 
 CREATE INDEX IF NOT EXISTS reception_documents_pilier_user_idx
   ON reception_documents(pilier_user_id);
+
+-- Secrétariat workflow columns
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS secretariat_status TEXT;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS secretariat_formatted_at TIMESTAMPTZ;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS secretariat_sent_at TIMESTAMPTZ;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS secretariat_user_id INTEGER REFERENCES users(id);
+
+CREATE INDEX IF NOT EXISTS reception_documents_secretariat_status_idx
+  ON reception_documents(secretariat_status);
