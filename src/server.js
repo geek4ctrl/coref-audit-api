@@ -2039,7 +2039,7 @@ app.patch("/service/documents/:id/finalize", authRequired, requireRole(["ADMIN",
 app.patch("/service/documents/:id/send-to-coordinator", authRequired, requireRole(["ADMIN", "SERVICE_INTERNE"]), async (req, res) => {
   try {
     const result = await query(
-      `UPDATE reception_documents SET pilier_status = 'ENVOYE_COORDINATEUR', pilier_sent_to_coordinator_at = NOW() WHERE id = $1 AND chief_decision = 'ASSIGN_SERVICE' RETURNING *`,
+      `UPDATE reception_documents SET pilier_status = 'ENVOYE_COORDINATEUR', pilier_sent_to_coordinator_at = NOW(), coordinator_status = 'EN_ATTENTE_VALIDATION' WHERE id = $1 AND chief_decision = 'ASSIGN_SERVICE' RETURNING *`,
       [req.params.id]
     );
     const doc = result.rows[0];
@@ -2249,12 +2249,95 @@ app.patch("/pilier/documents/:id/send-to-coordinator", authRequired, requireRole
 
 // ── COORDINATOR ENDPOINTS ──
 
+app.get("/coordinator/dashboard", authRequired, requireRole(["ADMIN", "PILIER_COORD"]), async (req, res) => {
+  try {
+    const [statsResult, documentsResult, historyResult] = await Promise.all([
+      query(
+        `SELECT
+          COUNT(*) FILTER (WHERE coordinator_status = 'EN_ATTENTE_VALIDATION')::INT AS pending,
+          COUNT(*) FILTER (WHERE coordinator_status = 'VALIDE')::INT AS validated,
+          COUNT(*) FILTER (WHERE coordinator_status = 'REJETE')::INT AS rejected,
+          COUNT(*) FILTER (
+            WHERE coordinator_status = 'EN_ATTENTE_VALIDATION'
+              AND chief_priority IN ('Haute', 'Urgente')
+          )::INT AS urgent,
+          COUNT(*) FILTER (
+            WHERE coordinator_status = 'EN_ATTENTE_VALIDATION'
+              AND chief_sla_days IS NOT NULL AND chief_decided_at IS NOT NULL
+              AND chief_decided_at + (chief_sla_days || ' days')::INTERVAL < NOW()
+          )::INT AS late
+        FROM reception_documents
+        WHERE coordinator_status IS NOT NULL`
+      ),
+      query(
+        `SELECT * FROM reception_documents
+         WHERE coordinator_status IN ('EN_ATTENTE_VALIDATION', 'VALIDE', 'REJETE')
+         ORDER BY
+           CASE coordinator_status
+             WHEN 'EN_ATTENTE_VALIDATION' THEN 0
+             WHEN 'REJETE' THEN 1
+             ELSE 2
+           END,
+           CASE chief_priority
+             WHEN 'Urgente' THEN 0 WHEN 'Haute' THEN 1 WHEN 'Normale' THEN 2 ELSE 3
+           END,
+           pilier_sent_to_coordinator_at DESC NULLS LAST
+         LIMIT 50`
+      ),
+      query(
+        `SELECT * FROM reception_documents
+         WHERE coordinator_status = 'VALIDE'
+           AND coordinator_validated_at >= NOW() - INTERVAL '7 days'
+         ORDER BY coordinator_validated_at DESC
+         LIMIT 10`
+      )
+    ]);
+
+    const stats = statsResult.rows[0] || {};
+
+    const categoryMap = {
+      "a-valider": (d) => d.coordinator_status === "EN_ATTENTE_VALIDATION",
+      "rejetes": (d) => d.coordinator_status === "REJETE",
+      "valides": (d) => d.coordinator_status === "VALIDE"
+    };
+
+    const documents = documentsResult.rows.map((doc) => {
+      const sanitized = sanitizePilierDocument(doc);
+      let category = "a-valider";
+      for (const [key, fn] of Object.entries(categoryMap)) {
+        if (fn(doc)) { category = key; break; }
+      }
+      return { ...sanitized, category };
+    });
+
+    const recentValidated = historyResult.rows.map(sanitizePilierDocument);
+
+    return res.json({
+      cards: {
+        pending: stats.pending || 0,
+        validated: stats.validated || 0,
+        rejected: stats.rejected || 0,
+        urgent: stats.urgent || 0,
+        late: stats.late || 0
+      },
+      documents,
+      recentValidated
+    });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch coordinator dashboard" });
+  }
+});
+
 app.get("/coordinator/documents", authRequired, requireRole(["ADMIN", "PILIER_COORD"]), async (req, res) => {
   try {
     const result = await query(
       `SELECT * FROM reception_documents
        WHERE coordinator_status = 'EN_ATTENTE_VALIDATION'
-       ORDER BY pilier_sent_to_coordinator_at DESC
+       ORDER BY
+         CASE chief_priority
+           WHEN 'Urgente' THEN 0 WHEN 'Haute' THEN 1 WHEN 'Normale' THEN 2 ELSE 3
+         END,
+         pilier_sent_to_coordinator_at DESC
        LIMIT 50`
     );
     return res.json({ documents: result.rows.map(sanitizePilierDocument) });
