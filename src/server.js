@@ -312,6 +312,7 @@ app.post("/auth/register", async (req, res) => {
     );
 
     const user = result.rows[0];
+    await logAudit(req, "CREATE", "USER", user.id, { name: user.name, email: user.email, role: user.role });
     return res.status(201).json({ user: sanitizeUser(user) });
   } catch (error) {
     if (error.code === "23505") {
@@ -346,6 +347,7 @@ app.post("/auth/login", async (req, res) => {
     }
 
     const token = generateToken(user);
+    await logAudit({ user: { userId: user.id, email: user.email, role: user.role }, ip: req.ip }, "LOGIN", "USER", user.id, { email: user.email });
     return res.json({ token, user: sanitizeUser(user) });
   } catch (error) {
     return res.status(500).json({ error: "Failed to login" });
@@ -510,7 +512,13 @@ app.patch("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) =
       ]
     );
 
-    return res.json({ user: sanitizeUser(updated.rows[0]) });
+    const updatedUser = updated.rows[0];
+    await logAudit(req, 'UPDATE_USER', 'USER', updatedUser.id, {
+      email: updatedUser.email, role: updatedUser.role,
+      changes: { name, email, role, isActive }
+    });
+
+    return res.json({ user: sanitizeUser(updatedUser) });
   } catch (error) {
     if (error.code === "23505") {
       return res.status(409).json({ error: "Email already exists" });
@@ -1194,6 +1202,7 @@ app.post("/reception/documents", authRequired, requireRole(["ADMIN", "RECEPTION"
       ]
     );
 
+    await logAudit(req, "CREATE", "DOCUMENT", result.rows[0].id, { number, category, sender });
     return res.status(201).json({ document: sanitizeReceptionDocument(result.rows[0]) });
   } catch (error) {
     if (error.code === "23505") {
@@ -1855,6 +1864,15 @@ app.patch("/chief/documents/:id/decision", authRequired, requireRole(["ADMIN", "
     if (!document) {
       return res.status(404).json({ error: "Document not found" });
     }
+
+    await logAudit(req, 'CHIEF_DECISION', 'DOCUMENT', document.id, {
+      number: document.number,
+      decision: normalizedDecision,
+      assignedToType: normalizedAssignedType,
+      assignedToValue: normalizedAssignedValue,
+      priority: normalizedPriority,
+      slaDays: normalizedSlaDays
+    });
 
     return res.json({
       document: {
@@ -2901,7 +2919,12 @@ app.post("/documents", authRequired, requireRole(["ADMIN", "CHEF_SG", "ASSISTANT
       ]
     );
 
-    return res.status(201).json({ document: sanitizeReceptionDocument(result.rows[0]) });
+    const created = result.rows[0];
+    await logAudit(req, 'CREATE_DOCUMENT', 'DOCUMENT', created.id, {
+      number: created.number, subject, category, sender
+    });
+
+    return res.status(201).json({ document: sanitizeReceptionDocument(created) });
   } catch (error) {
     if (error.code === "23505") {
       return res.status(409).json({ error: "A document number conflict occurred. Please retry." });
@@ -3105,6 +3128,182 @@ app.get("/auditeur/dashboard", authRequired, requireRole(["ADMIN", "AUDITEUR"]),
     });
   } catch (error) {
     return res.status(500).json({ error: "Failed to fetch auditeur dashboard" });
+  }
+});
+
+// ── AUDIT LOG HELPER ─────────────────────────────────────────────────
+async function logAudit(req, action, entityType, entityId, details) {
+  try {
+    await query(
+      `INSERT INTO audit_logs (user_id, user_email, user_role, action, entity_type, entity_id, details, ip_address)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        req.user?.userId || null,
+        req.user?.email || null,
+        req.user?.role || null,
+        action,
+        entityType,
+        entityId ? String(entityId) : null,
+        details ? JSON.stringify(details) : null,
+        req.ip || req.connection?.remoteAddress || null
+      ]
+    );
+  } catch (_) {
+    // Non-blocking — audit log failures must not break the main flow
+  }
+}
+
+// ── SERVICES & PILIERS ───────────────────────────────────────────────
+
+app.get("/services", authRequired, async (req, res) => {
+  try {
+    const result = await query("SELECT * FROM services ORDER BY code ASC");
+    return res.json({ services: result.rows.map(r => ({ id: r.id, name: r.name, code: r.code, description: r.description, isActive: r.is_active, createdAt: r.created_at })) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch services" });
+  }
+});
+
+app.post("/services", authRequired, requireRole(["ADMIN"]), async (req, res) => {
+  try {
+    const { name, code, description } = req.body || {};
+    if (!name || !code) return res.status(400).json({ error: "name and code are required" });
+    const result = await query(
+      "INSERT INTO services (name, code, description) VALUES ($1, $2, $3) RETURNING *",
+      [name.trim(), code.trim().toUpperCase(), description || null]
+    );
+    const r = result.rows[0];
+    await logAudit(req, "CREATE", "SERVICE", r.id, { name: r.name, code: r.code });
+    return res.status(201).json({ service: { id: r.id, name: r.name, code: r.code, description: r.description, isActive: r.is_active, createdAt: r.created_at } });
+  } catch (error) {
+    if (error.code === "23505") return res.status(409).json({ error: "Service code already exists" });
+    return res.status(500).json({ error: "Failed to create service" });
+  }
+});
+
+app.patch("/services/:id", authRequired, requireRole(["ADMIN"]), async (req, res) => {
+  try {
+    const { name, description, isActive } = req.body || {};
+    const fields = [];
+    const params = [];
+    let idx = 1;
+    if (name !== undefined) { fields.push(`name = $${idx++}`); params.push(name.trim()); }
+    if (description !== undefined) { fields.push(`description = $${idx++}`); params.push(description); }
+    if (isActive !== undefined) { fields.push(`is_active = $${idx++}`); params.push(isActive); }
+    if (fields.length === 0) return res.status(400).json({ error: "No fields to update" });
+    params.push(req.params.id);
+    const result = await query(`UPDATE services SET ${fields.join(", ")} WHERE id = $${idx} RETURNING *`, params);
+    if (result.rows.length === 0) return res.status(404).json({ error: "Service not found" });
+    const r = result.rows[0];
+    await logAudit(req, "UPDATE", "SERVICE", r.id, { name: r.name, code: r.code });
+    return res.json({ service: { id: r.id, name: r.name, code: r.code, description: r.description, isActive: r.is_active, createdAt: r.created_at } });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to update service" });
+  }
+});
+
+app.get("/piliers", authRequired, async (req, res) => {
+  try {
+    const result = await query("SELECT * FROM piliers ORDER BY code ASC");
+    return res.json({ piliers: result.rows.map(r => ({ id: r.id, name: r.name, code: r.code, description: r.description, isActive: r.is_active, createdAt: r.created_at })) });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch piliers" });
+  }
+});
+
+app.post("/piliers", authRequired, requireRole(["ADMIN"]), async (req, res) => {
+  try {
+    const { name, code, description } = req.body || {};
+    if (!name || !code) return res.status(400).json({ error: "name and code are required" });
+    const result = await query(
+      "INSERT INTO piliers (name, code, description) VALUES ($1, $2, $3) RETURNING *",
+      [name.trim(), code.trim().toUpperCase(), description || null]
+    );
+    const r = result.rows[0];
+    await logAudit(req, "CREATE", "PILIER", r.id, { name: r.name, code: r.code });
+    return res.status(201).json({ pilier: { id: r.id, name: r.name, code: r.code, description: r.description, isActive: r.is_active, createdAt: r.created_at } });
+  } catch (error) {
+    if (error.code === "23505") return res.status(409).json({ error: "Pilier code already exists" });
+    return res.status(500).json({ error: "Failed to create pilier" });
+  }
+});
+
+app.patch("/piliers/:id", authRequired, requireRole(["ADMIN"]), async (req, res) => {
+  try {
+    const { name, description, isActive } = req.body || {};
+    const fields = [];
+    const params = [];
+    let idx = 1;
+    if (name !== undefined) { fields.push(`name = $${idx++}`); params.push(name.trim()); }
+    if (description !== undefined) { fields.push(`description = $${idx++}`); params.push(description); }
+    if (isActive !== undefined) { fields.push(`is_active = $${idx++}`); params.push(isActive); }
+    if (fields.length === 0) return res.status(400).json({ error: "No fields to update" });
+    params.push(req.params.id);
+    const result = await query(`UPDATE piliers SET ${fields.join(", ")} WHERE id = $${idx} RETURNING *`, params);
+    if (result.rows.length === 0) return res.status(404).json({ error: "Pilier not found" });
+    const r = result.rows[0];
+    await logAudit(req, "UPDATE", "PILIER", r.id, { name: r.name, code: r.code });
+    return res.json({ pilier: { id: r.id, name: r.name, code: r.code, description: r.description, isActive: r.is_active, createdAt: r.created_at } });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to update pilier" });
+  }
+});
+
+// ── AUDIT LOGS ───────────────────────────────────────────────────────
+
+app.get("/audit-logs", authRequired, requireRole(["ADMIN", "AUDITEUR"]), async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 200);
+    const offset = Math.max(Number.parseInt(req.query.offset, 10) || 0, 0);
+    const action = typeof req.query.action === "string" ? req.query.action.trim() : "";
+    const entityType = typeof req.query.entityType === "string" ? req.query.entityType.trim() : "";
+
+    const conditions = [];
+    const params = [];
+    let paramIndex = 1;
+
+    if (action) {
+      conditions.push(`a.action = $${paramIndex++}`);
+      params.push(action);
+    }
+    if (entityType) {
+      conditions.push(`a.entity_type = $${paramIndex++}`);
+      params.push(entityType);
+    }
+
+    const whereClause = conditions.length > 0 ? "WHERE " + conditions.join(" AND ") : "";
+
+    const result = await query(
+      `SELECT a.*, u.name as user_name
+       FROM audit_logs a
+       LEFT JOIN users u ON u.id = a.user_id
+       ${whereClause}
+       ORDER BY a.created_at DESC
+       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+      [...params, limit, offset]
+    );
+
+    const countResult = await query(
+      `SELECT COUNT(*) as total FROM audit_logs a ${whereClause}`,
+      params
+    );
+
+    const logs = result.rows.map(r => ({
+      id: r.id,
+      userName: r.user_name || r.user_email || "Système",
+      userEmail: r.user_email,
+      userRole: r.user_role,
+      action: r.action,
+      entityType: r.entity_type,
+      entityId: r.entity_id,
+      details: r.details,
+      ipAddress: r.ip_address,
+      createdAt: r.created_at
+    }));
+
+    return res.json({ logs, total: parseInt(countResult.rows[0].total), limit, offset });
+  } catch (error) {
+    return res.status(500).json({ error: "Failed to fetch audit logs" });
   }
 });
 
