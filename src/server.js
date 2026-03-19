@@ -1362,7 +1362,7 @@ app.post("/reception/distributions/:id/generate-bordereau", authRequired, requir
     const year = new Date().getFullYear();
     const sequenceResult = await query(
       `
-      SELECT COALESCE(MAX(SUBSTRING(number FROM 10)::INT), 0) + 1 AS next_seq
+      SELECT COALESCE(MAX(CAST(SPLIT_PART(number, '-', 3) AS INT)), 0) + 1 AS next_seq
       FROM reception_bordereaux
       WHERE number LIKE $1
       `,
@@ -1384,6 +1384,13 @@ app.post("/reception/distributions/:id/generate-bordereau", authRequired, requir
     return res.status(201).json({ bordereau: bordereauResult.rows[0], alreadyExists: false });
   } catch (error) {
     if (error.code === "23505") {
+      const existingResult = await query(
+        "SELECT * FROM reception_bordereaux WHERE document_id = $1",
+        [req.params.id]
+      );
+      if (existingResult.rows[0]) {
+        return res.json({ bordereau: existingResult.rows[0], alreadyExists: true });
+      }
       return res.status(409).json({ error: "A bordereau conflict occurred. Please retry." });
     }
     return res.status(500).json({ error: "Failed to generate bordereau" });
