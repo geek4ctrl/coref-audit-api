@@ -197,6 +197,12 @@ ALTER TABLE reception_documents
 ALTER TABLE reception_documents
   ADD COLUMN IF NOT EXISTS coordinator_rejected_at TIMESTAMPTZ;
 
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS coordinator_comment TEXT;
+
+ALTER TABLE reception_documents
+  ADD COLUMN IF NOT EXISTS coordinator_user_id INTEGER REFERENCES users(id);
+
 -- Secretariat workflow columns
 ALTER TABLE reception_documents
   ADD COLUMN IF NOT EXISTS secretariat_status TEXT;
