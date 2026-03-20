@@ -2951,8 +2951,6 @@ app.get("/retards", authRequired, requireRole(["ADMIN", "CHEF_SG", "ASSISTANT_CH
         d.chief_sla_days,
         COALESCE(d.chief_priority, d.assistant_priority, 'Normale') AS priority,
         d.assistant_status,
-        d.pilier_status,
-        d.coordinator_status,
         d.chief_decided_at + (d.chief_sla_days || ' days')::INTERVAL AS deadline,
         EXTRACT(DAY FROM NOW() - (d.chief_decided_at + (d.chief_sla_days || ' days')::INTERVAL))::INT AS delay_days
       FROM reception_documents d
@@ -2971,9 +2969,7 @@ app.get("/retards", authRequired, requireRole(["ADMIN", "CHEF_SG", "ASSISTANT_CH
       dueDate: doc.deadline ? new Date(doc.deadline).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' }) : '—',
       delayDays: doc.delay_days || 0,
       priority: doc.priority,
-      status: doc.coordinator_status === 'VALIDE' ? 'Validé'
-        : doc.pilier_status === 'EN_TRAITEMENT' ? 'En traitement'
-        : doc.assistant_status || 'En retard'
+      status: doc.assistant_status || 'En retard'
     }));
 
     const totalLate = documents.length;
