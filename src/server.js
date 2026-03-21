@@ -596,7 +596,7 @@ app.delete("/users/:id", authRequired, requireRole(["ADMIN"]), async (req, res) 
  *         description: User not found
  */
 
-app.get("/messagerie/users", authRequired, requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG"]), async (req, res) => {
+app.get("/messagerie/users", authRequired, requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG", "ASSISTANT_CHEF"]), async (req, res) => {
   try {
     const result = await query(
       `
@@ -627,7 +627,7 @@ app.get("/messagerie/users", authRequired, requireRole(["ADMIN", "RECEPTION", "S
  *         description: Users list
  */
 
-app.get("/messagerie/inbox", authRequired, requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG"]), async (req, res) => {
+app.get("/messagerie/inbox", authRequired, requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG", "ASSISTANT_CHEF"]), async (req, res) => {
   try {
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 100);
     const [result, unreadResult] = await Promise.all([
@@ -688,7 +688,7 @@ app.get("/messagerie/inbox", authRequired, requireRole(["ADMIN", "RECEPTION", "S
  *         description: Inbox messages
  */
 
-app.post("/messagerie/messages/:id/mark-read", authRequired, requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG"]), async (req, res) => {
+app.post("/messagerie/messages/:id/mark-read", authRequired, requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG", "ASSISTANT_CHEF"]), async (req, res) => {
   try {
     const result = await query(
       `
@@ -730,7 +730,7 @@ app.post("/messagerie/messages/:id/mark-read", authRequired, requireRole(["ADMIN
  *         description: Updated message
  */
 
-app.get("/messagerie/sent", authRequired, requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG"]), async (req, res) => {
+app.get("/messagerie/sent", authRequired, requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG", "ASSISTANT_CHEF"]), async (req, res) => {
   try {
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 100);
     const result = await query(
@@ -782,7 +782,7 @@ app.get("/messagerie/sent", authRequired, requireRole(["ADMIN", "RECEPTION", "SE
 app.post(
   "/messagerie/messages",
   authRequired,
-  requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG"]),
+  requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG", "ASSISTANT_CHEF"]),
   messageUpload.single("attachment"),
   async (req, res) => {
   try {
@@ -851,7 +851,7 @@ app.post(
 app.get(
   "/messagerie/messages/:messageId/attachments/:attachmentId/download",
   authRequired,
-  requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG"]),
+  requireRole(["ADMIN", "RECEPTION", "SERVICE_INTERNE", "CHEF_SG", "ASSISTANT_CHEF"]),
   async (req, res) => {
     try {
       const result = await query(
